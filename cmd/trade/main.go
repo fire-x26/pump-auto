@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,42 +15,22 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-// 命令行参数
-var (
-	publicKey        string
-	privateKey       string
-	action           string
-	mint             string
-	amount           float64
-	denominatedInSol bool
-	slippage         int
-	priorityFee      float64
-	pool             string
-	rpcURL           string
-)
-
-func init() {
-	// 初始化命令行参数
-	flag.StringVar(&publicKey, "publickey", "", "您的公钥")
-	flag.StringVar(&privateKey, "privatekey", "", "您的私钥（base58格式）")
-	flag.StringVar(&action, "action", "buy", "交易类型 (buy或sell)")
-	flag.StringVar(&mint, "mint", "", "代币合约地址")
-	flag.Float64Var(&amount, "amount", 100000, "交易数量")
-	flag.BoolVar(&denominatedInSol, "insol", false, "数量是否为SOL (true=SOL, false=代币数量)")
-	flag.IntVar(&slippage, "slippage", 10, "允许的滑点百分比")
-	flag.Float64Var(&priorityFee, "priority", 0.005, "优先费用")
-	flag.StringVar(&pool, "pool", "auto", "交易池 (pump, raydium, pump-amm, launchlab, raydium-cpmm, bonk, auto)")
-	flag.StringVar(&rpcURL, "rpc", "https://mainnet.helius-rpc.com/?api-key=021015cb-98e8-485e-9f40-812b97f28ea3", "Solana RPC URL")
-}
-
 func main() {
-	// 解析命令行参数
-	flag.Parse()
+	// 硬编码的交易参数
+	publicKey := "Your public key here"
+	privateKey := "" // 需要填入您的私钥（base58格式）
+	action := "buy"
+	mint := "token CA here"
+	amount := 100000.0
+	denominatedInSol := false
+	slippage := 10
+	priorityFee := 0.005
+	pool := "auto"
+	rpcURL := "https://mainnet.helius-rpc.com/?api-key=021015cb-98e8-485e-9f40-812b97f28ea3"
 
 	// 验证必要参数
 	if publicKey == "" || privateKey == "" || mint == "" {
 		fmt.Println("必须提供公钥、私钥和代币合约地址")
-		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
