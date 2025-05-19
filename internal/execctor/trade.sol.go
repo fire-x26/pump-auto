@@ -2,6 +2,7 @@ package execctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -127,18 +128,14 @@ func (t *TradeExecutor) BuyToken(tokenAddress string, tokenSymbol string, amount
 			Price     float64
 			Timestamp time.Time
 		}, 0),
-		// 初始化聚合周期开始时间，可以用当前时间截断，或保持零值由聚合器首次填充
-		// 为简单起见，首次聚合时会自动填充
 	}
 	t.priceTracks[tokenAddress].RecentPrices = append(t.priceTracks[tokenAddress].RecentPrices, struct {
 		Price     float64
 		Timestamp time.Time
 	}{price, now})
 
-	// 启动价格聚合和原始价格更新协程
-	go t.priceAggregatorLoop(tokenAddress)
 	// 启动策略检查协程
-	go t.trackPriceStrategy(tokenAddress)
+	// go t.trackPriceStrategy(tokenAddress)
 
 	return nil
 }
@@ -159,17 +156,6 @@ func (t *TradeExecutor) UpdatePrice(tokenAddress string, newRawPrice float64) {
 	track.CurrentPrice = newRawPrice
 	track.LastUpdateTime = time.Now()
 
-	// 更新 RecentPrices：维护一个固定长度（如100）的最新价格队列
-	track.RecentPrices = append(track.RecentPrices, struct {
-		Price     float64
-		Timestamp time.Time // Timestamp 仍然保留，可能对其他分析有用或调试
-	}{newRawPrice, time.Now()})
-
-	// 如果队列超长，则从头部移除旧元素，保持固定长度
-	if len(track.RecentPrices) > maxRecentPrices {
-		track.RecentPrices = track.RecentPrices[len(track.RecentPrices)-maxRecentPrices:]
-	}
-
 	// 更新基于原始价格的历史最高价
 	if newRawPrice > track.HighestPrice {
 		track.HighestPrice = newRawPrice
@@ -177,77 +163,31 @@ func (t *TradeExecutor) UpdatePrice(tokenAddress string, newRawPrice float64) {
 	}
 }
 
-// priceAggregatorLoop 模拟从WebSocket接收原始价格，并进行聚合
-func (t *TradeExecutor) priceAggregatorLoop(tokenAddress string) {
-	// 模拟价格流的ticker，例如每秒一个新价格
-	priceStreamTicker := time.NewTicker(1 * time.Second)
-	defer priceStreamTicker.Stop()
+// WebSocket消息结构
+type WSMessage struct {
+	Method string   `json:"method"`
+	Keys   []string `json:"keys,omitempty"`
+	Data   struct {
+		TokenAddress string  `json:"tokenAddress"`
+		Price        float64 `json:"price"`
+		Timestamp    int64   `json:"timestamp"`
+	} `json:"data,omitempty"`
+}
 
-	for {
-		select {
-		case <-t.ctx.Done():
-			log.Printf("价格聚合器 %s 停止", tokenAddress)
-			return
-		case now := <-priceStreamTicker.C:
-			t.mutex.RLock() // RLock for reading priceTracks map
-			track, exists := t.priceTracks[tokenAddress]
-			t.mutex.RUnlock()
-
-			if !exists {
-				log.Printf("价格聚合器 %s 发现代币不再跟踪，停止", tokenAddress)
-				return
-			}
-
-			// 1. 模拟产生新的原始价格
-			var newRawPrice float64
-			track.mutex.Lock() // Lock for reading track.CurrentPrice safely
-			// 模拟价格小幅波动
-			priceDirection := math.Sin(float64(now.UnixNano()/1e9) / 10.0) // Slow sine wave for direction
-			changeFactor := 1 + (priceDirection * 0.005)                   // +/- 0.5% change
-			newRawPrice = track.CurrentPrice * changeFactor
-			if newRawPrice <= 0 { // Prevent price from becoming zero or negative in simulation
-				newRawPrice = track.EntryPrice * 0.1 // Reset to some small value if it crashes
-			}
-			track.mutex.Unlock()
-
-			// 2. 更新原始价格相关数据 (CurrentPrice, HighestPrice, StopLossLevel, RecentPrices)
-
-			// 3. 执行价格聚合 - K线周期对齐逻辑
-			track.mutex.Lock()
-			nowAggTime := time.Now() // 聚合逻辑使用的时间戳
-
-			// 15秒聚合周期
-			currentCycle15s := nowAggTime.Truncate(15 * time.Second)
-			if track.LastAggregatedCycleStart15s.IsZero() || currentCycle15s.After(track.LastAggregatedCycleStart15s) {
-				track.LatestPrice15s = newRawPrice // 使用当前原始价格作为本周期的快照
-				track.LastAggregatedCycleStart15s = currentCycle15s
-				// log.Printf("聚合 %s 15s价格 (周期 %s): %.6f", tokenAddress, currentCycle15s.Format("15:04:05"), newRawPrice)
-			}
-
-			// 30秒聚合周期
-			currentCycle30s := nowAggTime.Truncate(30 * time.Second)
-			if track.LastAggregatedCycleStart30s.IsZero() || currentCycle30s.After(track.LastAggregatedCycleStart30s) {
-				track.LatestPrice30s = newRawPrice
-				track.LastAggregatedCycleStart30s = currentCycle30s
-			}
-
-			// 1分钟聚合周期
-			currentCycle1m := nowAggTime.Truncate(1 * time.Minute)
-			if track.LastAggregatedCycleStart1m.IsZero() || currentCycle1m.After(track.LastAggregatedCycleStart1m) {
-				track.LatestPrice1m = newRawPrice
-				track.LastAggregatedCycleStart1m = currentCycle1m
-				log.Printf("聚合 %s 1m价格 (周期 %s): %.6f", tokenAddress, currentCycle1m.Format("15:04"), newRawPrice)
-			}
-
-			// 5分钟聚合周期
-			currentCycle5m := nowAggTime.Truncate(5 * time.Minute)
-			if track.LastAggregatedCycleStart5m.IsZero() || currentCycle5m.After(track.LastAggregatedCycleStart5m) {
-				track.LatestPrice5m = newRawPrice
-				track.LastAggregatedCycleStart5m = currentCycle5m
-			}
-			track.mutex.Unlock()
-		}
-	}
+// 交易记录结构
+type TradeRecord struct {
+	Signature             string  `json:"signature"`
+	Mint                  string  `json:"mint"` // 代币地址
+	TraderPublicKey       string  `json:"traderPublicKey"`
+	TxType                string  `json:"txType"` // buy/sell
+	TokenAmount           float64 `json:"tokenAmount"`
+	SolAmount             float64 `json:"solAmount"`
+	NewTokenBalance       float64 `json:"newTokenBalance"`
+	BondingCurveKey       string  `json:"bondingCurveKey"`
+	VTokensInBondingCurve float64 `json:"vTokensInBondingCurve"`
+	VSolInBondingCurve    float64 `json:"vSolInBondingCurve"`
+	MarketCapSol          float64 `json:"marketCapSol"`
+	Pool                  string  `json:"pool"`
 }
 
 // trackPriceStrategy 定期检查并执行交易策略 (基于聚合价格)
@@ -289,14 +229,14 @@ func (t *TradeExecutor) checkAndExecuteStrategies(tokenAddress string) {
 	}
 
 	// 0. 紧急止损检查 (基于固定数量的 RecentPrices 队列的头尾价格)
-	triggeredStop, dropReason, actualDropPct := t.checkFixedQueueFallStop(track, 0.05)
-	if triggeredStop {
-		sellAmount := track.RemainingCoin
-		log.Printf("固定队列止损触发 (%s): %s 价格跌幅 %.2f%%, 全部卖出 (约 %.6f 币)",
-			dropReason, track.Symbol, actualDropPct*100, sellAmount)
-		t.executeTokenSellInternal(track, tokenAddress, sellAmount)
-		return
-	}
+	// triggeredStop, dropReason, actualDropPct := t.checkFixedQueueFallStop(track, 0.05)
+	// if triggeredStop {
+	// 	sellAmount := track.RemainingCoin
+	// 	log.Printf("固定队列止损触发 (%s): %s 价格跌幅 %.2f%%, 全部卖出 (约 %.6f 币)",
+	// 		dropReason, track.Symbol, actualDropPct*100, sellAmount)
+	// 	t.executeTokenSellInternal(track, tokenAddress, sellAmount)
+	// 	return
+	// }
 
 	// 1. 新的兜底止损策略：如果当前最新原始价格低于买入价的5%
 	if track.CurrentPrice < track.EntryPrice*0.95 {
@@ -315,23 +255,23 @@ func (t *TradeExecutor) checkAndExecuteStrategies(tokenAddress string) {
 }
 
 // 检查固定长度队列的头尾价格跌幅
-func (t *TradeExecutor) checkFixedQueueFallStop(track *PriceTrackInfo, fallPercent float64) (triggered bool, reason string, actualFallPct float64) {
-	queueLen := len(track.RecentPrices)
-	if queueLen < maxRecentPrices { // 队列未满，不执行此止损，或根据需求调整逻辑
-		return false, "队列未满", 0
-	}
+// func (t *TradeExecutor) checkFixedQueueFallStop(track *PriceTrackInfo, fallPercent float64) (triggered bool, reason string, actualFallPct float64) {
+// 	queueLen := len(track.RecentPrices)
+// 	if queueLen < maxRecentPrices { // 队列未满，不执行此止损，或根据需求调整逻辑
+// 		return false, "队列未满", 0
+// 	}
 
-	headPrice := track.RecentPrices[0].Price          // 队列中最早的价格
-	tailPrice := track.RecentPrices[queueLen-1].Price // 队列中最新的价格 (等同于 track.CurrentPrice)
+// 	headPrice := track.RecentPrices[0].Price          // 队列中最早的价格
+// 	tailPrice := track.RecentPrices[queueLen-1].Price // 队列中最新的价格 (等同于 track.CurrentPrice)
 
-	if headPrice > 0 && tailPrice < headPrice { // 必须有实际的下跌，且最早价格为正
-		dropPct := (headPrice - tailPrice) / headPrice
-		if dropPct >= fallPercent { // 跌幅达到指定百分比
-			return true, fmt.Sprintf("最近%d个价格点内跌幅%.2f%%", maxRecentPrices, fallPercent*100), dropPct
-		}
-	}
-	return false, "", 0
-}
+// 	if headPrice > 0 && tailPrice < headPrice { // 必须有实际的下跌，且最早价格为正
+// 		dropPct := (headPrice - tailPrice) / headPrice
+// 		if dropPct >= fallPercent { // 跌幅达到指定百分比
+// 			return true, fmt.Sprintf("最近%d个价格点内跌幅%.2f%%", maxRecentPrices, fallPercent*100), dropPct
+// 		}
+// 	}
+// 	return false, "", 0
+// }
 
 // 检查并执行止盈策略 - 使用switch-case提高效率
 // track 应已被外部锁定
@@ -585,4 +525,39 @@ func (t *TradeExecutor) PrintTradeStatus(tokenAddress string) {
 		track.RemainingCoin.String(),
 		((track.CurrentPrice/track.EntryPrice)-1)*100,
 		track.Status)
+}
+
+// ProcessTradeMessage 处理从WebSocket收到的交易消息
+func (t *TradeExecutor) ProcessTradeMessage(message []byte) {
+	// 解析交易记录
+	var tradeRecord TradeRecord
+	if err := json.Unmarshal(message, &tradeRecord); err != nil {
+		log.Printf("解析WebSocket交易消息失败: %v, 原始消息: %s", err, string(message))
+		return
+	}
+
+	// 检查是否为我们跟踪的代币
+	t.mutex.RLock()
+	_, exists := t.priceTracks[tradeRecord.Mint]
+	t.mutex.RUnlock()
+
+	if !exists {
+		// 不是我们跟踪的代币，忽略
+		return
+	}
+
+	// 计算价格 (SOL/代币单价)
+	var price float64
+	if tradeRecord.TokenAmount > 0 {
+		price = tradeRecord.SolAmount / tradeRecord.TokenAmount
+	} else {
+		log.Printf("警告: 交易记录中TokenAmount为0，无法计算价格: %v", tradeRecord)
+		return
+	}
+
+	// 更新价格
+	t.UpdatePrice(tradeRecord.Mint, price)
+	t.checkAndExecuteStrategies(tradeRecord.Mint)
+	log.Printf("收到 %s 的新交易(%s): 价格 %.10f SOL/代币, 代币数量: %.6f, SOL: %.6f",
+		tradeRecord.Mint, tradeRecord.TxType, price, tradeRecord.TokenAmount, tradeRecord.SolAmount)
 }

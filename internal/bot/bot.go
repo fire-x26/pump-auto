@@ -28,6 +28,8 @@ type Bot struct {
 	workerPool    chan struct{}           // 工作池通道，用于限制并发工作线程数
 	workerWg      sync.WaitGroup          // 等待组，用于等待所有工作线程完成
 	tradeExecutor *execctor.TradeExecutor // 交易执行器
+	wsConn        *websocket.Conn         // WebSocket连接
+	wsMutex       sync.Mutex              // 保护WebSocket连接的锁
 }
 
 // 创建新的Bot实例
@@ -42,6 +44,26 @@ func NewBot() *Bot {
 		workerPool:    make(chan struct{}, 26),     // 创建容量为26的工作池
 		tradeExecutor: execctor.NewTradeExecutor(), // 创建交易执行器
 	}
+}
+
+// 获取当前WebSocket连接
+func (b *Bot) GetWebSocketConn() *websocket.Conn {
+	b.wsMutex.Lock()
+	defer b.wsMutex.Unlock()
+	return b.wsConn
+}
+
+// SubscribeToTokenTrade 订阅代币交易
+func (b *Bot) SubscribeToTokenTrade(tokenAddress string) error {
+	b.wsMutex.Lock()
+	ws := b.wsConn
+	b.wsMutex.Unlock()
+
+	if ws == nil {
+		return fmt.Errorf("WebSocket连接未建立")
+	}
+
+	return subscribeToTokenTrades(ws, []string{tokenAddress})
 }
 
 // 修改监听实现代码
@@ -73,17 +95,27 @@ func (b *Bot) RunListener() error {
 				continue
 			}
 
+			// 保存WebSocket连接
+			b.wsMutex.Lock()
+			b.wsConn = ws
+			b.wsMutex.Unlock()
+
 			// 重置重试计数
 			retryCount = 0
 			log.Println("成功连接到pumpportal.fun WebSocket API")
 
 			// 设置关闭处理函数
 			defer func() {
-				if err := ws.Close(); err != nil {
-					log.Printf("关闭WebSocket连接失败: %v", err)
-				} else {
-					log.Println("WebSocket连接已正常关闭")
+				b.wsMutex.Lock()
+				if b.wsConn != nil {
+					if err := b.wsConn.Close(); err != nil {
+						log.Printf("关闭WebSocket连接失败: %v", err)
+					} else {
+						log.Println("WebSocket连接已正常关闭")
+					}
+					b.wsConn = nil
 				}
+				b.wsMutex.Unlock()
 			}()
 
 			// 2. 订阅新代币创建事件
@@ -91,15 +123,9 @@ func (b *Bot) RunListener() error {
 				log.Printf("订阅新代币事件失败: %v, 将重新连接", err)
 				// 关闭当前连接并重新开始
 				ws.Close()
-				time.Sleep(retryDelay)
-				continue
-			}
-
-			// 3. 订阅迁移事件
-			if err := subscribeToMigrations(ws); err != nil {
-				log.Printf("订阅迁移事件失败: %v, 将重新连接", err)
-				// 关闭当前连接并重新开始
-				ws.Close()
+				b.wsMutex.Lock()
+				b.wsConn = nil
+				b.wsMutex.Unlock()
 				time.Sleep(retryDelay)
 				continue
 			}
@@ -154,16 +180,21 @@ func (b *Bot) RunListener() error {
 
 					// 以更易读的方式打印消息
 					if _, ok := data["method"]; !ok {
-						// 如果消息没有method字段，可能是代币事件
-						formattedMsg := model.FormatTokenEvent(message)
-						log.Println(formattedMsg)
-
-						// 同时解析为TokenEvent结构体，以便正确获取字段
+						// 解析为TokenEvent结构体，用于判断消息类型
 						var tokenEvent model.TokenEvent
 						if err := json.Unmarshal(message, &tokenEvent); err != nil {
 							log.Printf("解析为TokenEvent失败: %v", err)
 							continue
 						}
+
+						// 如果是交易记录消息(buy或sell)，则转发给交易执行器更新价格
+						if tokenEvent.TxType == "buy" || tokenEvent.TxType == "sell" {
+							b.tradeExecutor.ProcessTradeMessage(message)
+						}
+
+						// 格式化打印消息
+						formattedMsg := model.FormatTokenEvent(message)
+						log.Println(formattedMsg)
 
 						// 检查是否是新代币创建事件(txType=create)
 						if tokenEvent.TxType == "create" {
@@ -191,6 +222,9 @@ func (b *Bot) RunListener() error {
 
 			// 连接断开或需要重连，等待一段时间再尝试
 			log.Println("准备重新连接WebSocket服务...")
+			b.wsMutex.Lock()
+			b.wsConn = nil
+			b.wsMutex.Unlock()
 			time.Sleep(retryDelay)
 		}
 	}
@@ -238,8 +272,23 @@ func (b *Bot) buyToken(tokenAddress string, tokenSymbol string, tokenName string
 	buyAmount := 0.1 // 示例金额: 0.1 SOL
 	price := 1.0     // 示例价格
 
-	// 使用交易执行器执行买入操作
-	err := b.tradeExecutor.BuyToken(tokenAddress, tokenSymbol, buyAmount, price, 6)
+	// 获取当前WebSocket连接
+	wsConn := b.GetWebSocketConn()
+
+	// 使用交易执行器执行买入操作并订阅价格
+	var err error
+	if wsConn != nil {
+		// 先订阅代币交易
+		if subErr := b.SubscribeToTokenTrade(tokenAddress); subErr != nil {
+			log.Printf("订阅代币 %s 交易失败: %v", tokenAddress, subErr)
+		}
+
+		// 买入代币
+		err = b.tradeExecutor.BuyToken(tokenAddress, tokenSymbol, buyAmount, price, 6)
+	} else {
+		log.Printf("WebSocket连接未建立，将使用不订阅价格的方式买入代币")
+		err = b.tradeExecutor.BuyToken(tokenAddress, tokenSymbol, buyAmount, price, 6)
+	}
 
 	b.mutex.Lock()
 	b.isBuying = false
