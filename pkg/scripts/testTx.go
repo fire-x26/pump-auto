@@ -1,143 +1,134 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
-	"flag"
+	_ "context"
+	"encoding/json"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
+	"io"
+	"net/http"
+
+	_ "github.com/gagliardetto/solana-go/rpc"
+	_ "github.com/gagliardetto/solana-go/rpc/jsonrpc"
 )
 
-// 命令行参数
-var (
-	publicKey        string
-	privateKey       string
-	action           string
-	mint             string
-	amount           float64
-	denominatedInSol bool
-	slippage         int
-	priorityFee      float64
-	pool             string
-	rpcURL           string
-)
-
-func init() {
-	// 初始化命令行参数
-	flag.StringVar(&publicKey, "publickey", "", "您的公钥")
-	flag.StringVar(&privateKey, "privatekey", "", "您的私钥（base58格式）")
-	flag.StringVar(&action, "action", "buy", "交易类型 (buy或sell)")
-	flag.StringVar(&mint, "mint", "", "代币合约地址")
-	flag.Float64Var(&amount, "amount", 100000, "交易数量")
-	flag.BoolVar(&denominatedInSol, "insol", false, "数量是否为SOL (true=SOL, false=代币数量)")
-	flag.IntVar(&slippage, "slippage", 10, "允许的滑点百分比")
-	flag.Float64Var(&priorityFee, "priority", 0.005, "优先费用")
-	flag.StringVar(&pool, "pool", "auto", "交易池 (pump, raydium, pump-amm, launchlab, raydium-cpmm, bonk, auto)")
-	flag.StringVar(&rpcURL, "rpc", "https://mainnet.helius-rpc.com/?api-key=021015cb-98e8-485e-9f40-812b97f28ea3", "Solana RPC URL")
+// TradeRequest represents the request body for the pumpportal API
+type TradeRequest struct {
+	PublicKey        string  `json:"publicKey"`
+	Action           string  `json:"action"`
+	Mint             string  `json:"mint"`
+	Amount           string  `json:"amount"` // Changed to string to support percentages
+	DenominatedInSol string  `json:"denominatedInSol"`
+	Slippage         int     `json:"slippage"`
+	PriorityFee      float64 `json:"priorityFee"`
+	Pool             string  `json:"pool,omitempty"` // Optional, defaults to "pump"
 }
 
 func main() {
-	// 解析命令行参数
-	flag.Parse()
+	// Initialize Solana RPC client
+	rpcEndpoint := "https://mainnet.helius-rpc.com/?api-key=021015cb-98e8-485e-9f40-812b97f28ea3"
+	client := rpc.New(rpcEndpoint)
 
-	// 验证必要参数
-	if publicKey == "" || privateKey == "" || mint == "" {
-		fmt.Println("必须提供公钥、私钥和代币合约地址")
-		flag.PrintDefaults()
-		os.Exit(1)
+	// Prepare trade request
+	tradeReq := TradeRequest{
+		PublicKey:        "EHKyF2UVTtrE9ZJpDsStkQP52LzkY52qFJxbZgJhoppp",
+		Action:           "buy",                                          // "buy" or "sell"
+		Mint:             "5BvJsQ7UyWJMm2pmQeNjYLFsLaRuyyQcaBwFTPhupump", // contract address of the token
+		Amount:           "100000",                                       // Use string: number (e.g., "100000") or percentage (e.g., "100%")
+		DenominatedInSol: "false",                                        // "true" for SOL, "false" for tokens
+		Slippage:         10,                                             // percent slippage
+		PriorityFee:      0.005,                                          // priority fee
+		Pool:             "auto",                                         // exchange: "pump", "raydium", etc. (optional)
 	}
 
-	// 验证私钥并获取公钥
-	privKey, err := solana.PrivateKeyFromBase58(privateKey)
+	// Convert request to JSON
+	reqBody, err := json.Marshal(tradeReq)
 	if err != nil {
-		log.Fatalf("无效的私钥: %v", err)
+		fmt.Printf("Error marshaling request: %v\n", err)
+		return
 	}
 
-	// 验证提供的公钥与私钥是否匹配
-	derivedPubKey := privKey.PublicKey().String()
-	if derivedPubKey != publicKey {
-		log.Printf("警告: 提供的公钥 (%s) 与从私钥派生的公钥 (%s) 不匹配", publicKey, derivedPubKey)
-		log.Printf("将使用从私钥派生的公钥: %s", derivedPubKey)
-		publicKey = derivedPubKey
-	}
-
-	// 步骤1: 获取未签名交易
-	log.Printf("步骤1: 从API获取未签名交易")
-
-	// 构建API请求参数
-	formData := url.Values{}
-	formData.Set("publicKey", publicKey)
-	formData.Set("action", action)
-	formData.Set("mint", mint)
-	formData.Set("amount", fmt.Sprintf("%f", amount))
-	formData.Set("denominatedInSol", fmt.Sprintf("%t", denominatedInSol))
-	formData.Set("slippage", fmt.Sprintf("%d", slippage))
-	formData.Set("priorityFee", fmt.Sprintf("%f", priorityFee))
-	formData.Set("pool", pool)
-
-	// 发送请求获取交易数据
+	// Make POST request to pumpportal
 	resp, err := http.Post(
 		"https://pumpportal.fun/api/trade-local",
-		"application/x-www-form-urlencoded",
-		strings.NewReader(formData.Encode()),
+		"application/json",
+		bytes.NewBuffer(reqBody),
 	)
 	if err != nil {
-		log.Fatalf("请求API失败: %v", err)
+		fmt.Printf("Error making trade request: %v\n", err)
+		return
 	}
 	defer resp.Body.Close()
 
-	// 读取API响应
+	// Check HTTP status
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("API error: status %d, response: %s\n", resp.StatusCode, string(body))
+		return
+	} else {
+		fmt.Println("相应获取成功")
+	}
 	txBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("读取API响应失败: %v", err)
+		fmt.Printf("Error reading response: %v\n", err)
+		return
 	}
 
-	if len(txBytes) == 0 {
-		log.Fatalf("API返回的交易数据为空")
+	privateKey := "3sXbWaTC7dqsg8Ck35T5XZketcTVpRCaFVWWafv5T9ES3NBXWNutBRmHUpiGri4H59nFmK4v25v8SKK2v3Z7hGSU"
+	account, err := solana.PrivateKeyFromBase58(privateKey)
+	if err != nil {
+		fmt.Printf("Error loading private key: %v\n", err)
+		return
 	}
 
-	log.Printf("成功获取未签名交易，大小: %d 字节", len(txBytes))
+	// Deserialize transaction
 
-	// 步骤2: 签名交易
-	log.Printf("步骤2: 签名交易")
+	//tsa, err := solana.NewTransaction()
+	// 6. 反序列化交易
+	var tx *solana.Transaction
+	// 尝试作为二进制交易数据处理
+	tx, err = solana.TransactionFromBytes(txBytes)
+	if err != nil {
+		// 如果二进制失败，尝试作为 Base64 处理
+		fmt.Printf("TransactionFromBytes failed: %v\n", err)
+		tx, err = solana.TransactionFromBase64(string(txBytes))
+		if err != nil {
+			fmt.Printf("TransactionFromBase64 failed: %v\n", err)
+			return
+		}
+	}
+	// Sign transaction
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(account.PublicKey()) {
+			return &account
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Printf("Error signing transaction: %v\n", err)
+		return
+	}
+	maxRetries := uint(3) // Create a uint variable
 
-	// 将交易字节转换为VersionedTransaction对象
-	// 注意: 这部分可能需要根据API返回的实际格式调整
-	// 以下是简化实现，假设API直接返回了可用的二进制交易数据
-
-	// 这里应该有更复杂的解析逻辑
-	// 简化处理，直接使用原始交易字节
-	signedTxBytes := txBytes
-
-	log.Printf("交易已签名，大小: %d 字节", len(signedTxBytes))
-
-	// 步骤3: 发送签名后的交易
-	log.Printf("步骤3: 将签名后的交易发送到RPC节点")
-
-	// 创建RPC客户端
-	client := rpc.New(rpcURL)
-
-	// 将交易进行Base64编码
-	encodedTx := base64.StdEncoding.EncodeToString(signedTxBytes)
-
-	// 发送交易
-	sig, err := client.SendEncodedTransaction(
-		context.Background(),
-		encodedTx,
+	// Send transaction
+	ctx := context.Background()
+	txSig, err := client.SendTransactionWithOpts(
+		ctx,
+		tx,
+		rpc.TransactionOpts{
+			SkipPreflight:       false,
+			PreflightCommitment: rpc.CommitmentConfirmed,
+			MaxRetries:          &maxRetries, // Add retries for RPC failures
+		},
 	)
 	if err != nil {
-		log.Fatalf("发送交易失败: %v", err)
+		fmt.Printf("Error sending transaction: %v\n", err)
+		return
 	}
 
-	// 步骤4: 打印交易签名
-	fmt.Printf("交易已发送! 签名: %s\n", sig)
-	fmt.Printf("查看交易: https://solscan.io/tx/%s\n", sig)
+	// Print transaction link
+	fmt.Printf("Transaction: https://solscan.io/tx/%s\n", txSig)
 }
