@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"math/big"
 	"sync"
 	"time"
@@ -31,27 +30,28 @@ type PriceTrackInfo struct {
 	CurrentPrice   float64          // 当前最新原始价格 (下一步处理精度)
 	BuyAmount      *big.Int         // 买入数量 (最小单位)
 	RemainingCoin  *big.Int         // 剩余币量 (最小单位)
+	RemainPercent  float64          // 剩余百分比
 	Status         TokenTradeStatus // 交易状态
 	BuyTime        time.Time        // 买入时间
 	LastUpdateTime time.Time        // 最新原始价格的更新时间
 	Decimals       uint8            // 代币的精度
 
-	RecentPrices []struct { // 记录最近的原始价格数据，用于短期跌幅监控
-		Price     float64
-		Timestamp time.Time
-	}
+	// RecentPrices []struct { // 记录最近的原始价格数据，用于短期跌幅监控
+	// 	Price     float64
+	// 	Timestamp time.Time
+	// }
 
 	// 聚合价格数据
-	LatestPrice15s float64 // 最近15秒聚合价格 (取间隔末尾的原始价)
-	LatestPrice30s float64 // 最近30秒聚合价格
-	LatestPrice1m  float64 // 最近1分钟聚合价格
-	LatestPrice5m  float64 // 最近5分钟聚合价格
+	// LatestPrice15s float64 // 最近15秒聚合价格 (取间隔末尾的原始价)
+	// LatestPrice30s float64 // 最近30秒聚合价格
+	// LatestPrice1m  float64 // 最近1分钟聚合价格
+	// LatestPrice5m  float64 // 最近5分钟聚合价格
 
-	// K线周期对齐的聚合时间戳 (记录的是周期的开始时间)
-	LastAggregatedCycleStart15s time.Time
-	LastAggregatedCycleStart30s time.Time
-	LastAggregatedCycleStart1m  time.Time
-	LastAggregatedCycleStart5m  time.Time
+	// // K线周期对齐的聚合时间戳 (记录的是周期的开始时间)
+	// LastAggregatedCycleStart15s time.Time
+	// LastAggregatedCycleStart30s time.Time
+	// LastAggregatedCycleStart1m  time.Time
+	// LastAggregatedCycleStart5m  time.Time
 
 	mutex sync.Mutex // 保护并发访问
 }
@@ -90,54 +90,6 @@ func NewTradeExecutor() *TradeExecutor {
 		cancel:          cancel,
 		triggeredLevels: make(map[string]bool),
 	}
-}
-
-// 买入代币
-func (t *TradeExecutor) BuyToken(tokenAddress string, tokenSymbol string, amount float64, price float64, decimals uint8) error {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	if _, exists := t.priceTracks[tokenAddress]; exists {
-		return fmt.Errorf("已经买入此代币: %s", tokenAddress)
-	}
-
-	// 将 float64 amount 转换为 *big.Int 最小单位
-	amountInt := new(big.Int)
-	if amount > 0 {
-		amountBigFloat := new(big.Float).SetFloat64(amount)
-		scaleFactor := new(big.Float).SetUint64(uint64(math.Pow10(int(decimals))))
-		amountScaled := new(big.Float).Mul(amountBigFloat, scaleFactor)
-		amountScaled.Int(amountInt) // 转换并截断小数部分（通常代币量不应有小数的最小单位）
-	}
-
-	log.Printf("买入代币 %s (%s), 数量 (float): %.6f, 价格: %.6f, Decimals: %d, 数量 (big.Int): %s", tokenAddress, tokenSymbol, amount, price, decimals, amountInt.String())
-
-	now := time.Now()
-	t.priceTracks[tokenAddress] = &PriceTrackInfo{
-		Symbol:         tokenSymbol,
-		EntryPrice:     price,
-		HighestPrice:   price,
-		CurrentPrice:   price,
-		BuyAmount:      new(big.Int).Set(amountInt), // 使用Set来复制，避免指针问题
-		RemainingCoin:  new(big.Int).Set(amountInt),
-		Status:         StatusBought,
-		BuyTime:        now,
-		LastUpdateTime: now,
-		Decimals:       decimals,
-		RecentPrices: make([]struct {
-			Price     float64
-			Timestamp time.Time
-		}, 0),
-	}
-	t.priceTracks[tokenAddress].RecentPrices = append(t.priceTracks[tokenAddress].RecentPrices, struct {
-		Price     float64
-		Timestamp time.Time
-	}{price, now})
-
-	// 启动策略检查协程
-	// go t.trackPriceStrategy(tokenAddress)
-
-	return nil
 }
 
 // UpdatePrice 处理原始价格流，更新直接受原始价格影响的字段
@@ -244,7 +196,7 @@ func (t *TradeExecutor) checkAndExecuteStrategies(tokenAddress string) {
 		lossPct := (track.EntryPrice - track.CurrentPrice) / track.EntryPrice * 100
 		log.Printf("兜底止损触发: %s 当前价格 %.6f 低于买入价 %.6f 的 %.2f%%, 全部卖出 (约 %.6f 币)",
 			track.Symbol, track.CurrentPrice, track.EntryPrice, lossPct, sellAmount)
-		t.executeTokenSellInternal(track, tokenAddress, sellAmount)
+		t.executeTokenSellInternal(track, tokenAddress, sellAmount, 1.00)
 		return
 	}
 
@@ -335,66 +287,37 @@ func (t *TradeExecutor) checkTakeProfit(track *PriceTrackInfo, tokenAddress stri
 	t.triggeredLevels[levelKey] = true
 	t.mutex.Unlock()
 
-	// 已经卖出的币量占总买入量的百分比
-	var soldPctOfBuyAmount float64
-	if track.BuyAmount.Cmp(big.NewInt(0)) > 0 { // track.BuyAmount > 0
-		buyAmountF := new(big.Float).SetInt(track.BuyAmount)
-		remainingCoinF := new(big.Float).SetInt(track.RemainingCoin)
-		soldAmountF := new(big.Float).Sub(buyAmountF, remainingCoinF)
-		soldPctOfBuyAmountF := new(big.Float).Quo(soldAmountF, buyAmountF)
-		soldPctOfBuyAmount, _ = soldPctOfBuyAmountF.Float64()
-	}
+	// 不计算具体数量，直接使用百分比
+	sellPctForThisLevel := targetOverallSellPct // 直接使用目标百分比
 
-	// 本次需要卖出的百分比 = 目标总卖出百分比 - 已卖出百分比
-	sellPctForThisLevel := targetOverallSellPct - soldPctOfBuyAmount
-	if sellPctForThisLevel <= 1e-6 { // 允许小的浮点误差
-		return false
-	}
-
-	// 计算本次实际卖出数量 (基于初始购买量)
-	sellAmountF := new(big.Float).SetInt(track.BuyAmount)
-	sellPctF := new(big.Float).SetFloat64(sellPctForThisLevel)
-	actualSellAmountF := new(big.Float).Mul(sellAmountF, sellPctF)
-
+	// 创建一个big.Float表示sellPctForThisLevel
+	sellPctBigFloat := new(big.Float).SetFloat64(sellPctForThisLevel)
+	// 将BuyAmount转为big.Float
+	buyAmountBigFloat := new(big.Float).SetInt(track.BuyAmount)
+	// 计算卖出数量
+	resultBigFloat := new(big.Float).Mul(buyAmountBigFloat, sellPctBigFloat)
+	// 转回big.Int
 	sellAmount := new(big.Int)
-	actualSellAmountF.Int(sellAmount) // 截断取整
-
-	// 如果是100%目标卖出级别，则确保卖出所有剩余代币以处理精度问题
-	if targetOverallSellPct == 1.0 {
-		sellAmount.Set(track.RemainingCoin)
-	} else {
-		// 对于部分卖出，确保不超过剩余量
-		if sellAmount.Cmp(track.RemainingCoin) > 0 {
-			sellAmount.Set(track.RemainingCoin)
-		}
-	}
-
-	// 如果最终计算的卖出数量为0（可能由于sellPctForThisLevel太小或已满足条件），
-	// 则不执行卖出，并取消该级别的触发标记
-	if sellAmount.Cmp(big.NewInt(0)) <= 0 {
-		t.mutex.Lock()                      // Lock for t.triggeredLevels
-		delete(t.triggeredLevels, levelKey) // 撤销标记
-		t.mutex.Unlock()
-		return false
-	}
+	resultBigFloat.Int(sellAmount)
 
 	log.Printf("止盈触发: %s 使用策略价格 %.6f (盈利 %.2f%%), 达到级别 %.2f%%. 目标总卖出 %.2f%%, 本次卖出初始购买量的 %.2f%% (%s 最小单位)",
 		track.Symbol, priceForStrategy, currentPriceIncreasePct*100, targetOverallSellPct*100, targetOverallSellPct*100, sellPctForThisLevel*100, sellAmount.String())
 
-	t.executeTokenSellInternal(track, tokenAddress, sellAmount) // Pass track
+	t.executeTokenSellInternal(track, tokenAddress, sellAmount, sellPctForThisLevel) // Pass track
 	return true
 }
 
 // 此函数在调用时，track 应已被锁定
-func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, tokenAddress string, amount *big.Int) { // amount 类型改为 *big.Int
-	if amount.Cmp(big.NewInt(0)) <= 0 { // 避免卖出0或负数数量
+func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, tokenAddress string, amount *big.Int, sellPct float64) { // amount 类型改为 *big.Int
+	if amount.Cmp(big.NewInt(0)) <= 0 || sellPct <= 0 { // 避免卖出0或负数数量
 		log.Printf("尝试卖出 %s 的数量 %s 过小或为0，取消卖出", track.Symbol, amount.String())
 		return
 	}
 
-	log.Printf("模拟执行卖出: 代币 %s, 数量 (最小单位): %s, 当前策略价格: %.6f, 当前原始价格: %.6f", track.Symbol, amount.String(), track.LatestPrice1m, track.CurrentPrice)
+	log.Printf("模拟执行卖出: 代币 %s, 数量 (最小单位): %s, 当前策略价格: %.6f, 当前原始价格: %.6f", track.Symbol, amount.String(), track.CurrentPrice)
 
 	track.RemainingCoin.Sub(track.RemainingCoin, amount)
+	track.RemainPercent = float64(track.RemainingCoin.Int64()) / float64(track.BuyAmount.Int64())
 	if track.RemainingCoin.Cmp(big.NewInt(0)) <= 0 { // 如果剩余币量小于等于0
 		track.RemainingCoin.SetInt64(0) // 确保为0，避免负数
 		track.Status = StatusSold
@@ -449,9 +372,6 @@ func (t *TradeExecutor) SimulatePriceChange(tokenAddress string, priceMultiplier
 	// For the test to work as intended, the strategy check needs to use this newPrice.
 	// Force update LatestPrice1m which is used by the strategy check.
 	// This ensures that the checkAndExecuteStrategies call below uses the explicitly simulated price.
-	track.mutex.Lock()
-	track.LatestPrice1m = newPrice
-	track.mutex.Unlock()
 
 	// Now execute strategies with LatestPrice1m having been set to newPrice
 	t.checkAndExecuteStrategies(tokenAddress)

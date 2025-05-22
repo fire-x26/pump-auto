@@ -7,9 +7,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"pump_auto/internal/chainTx"
+	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
-	"pump_auto/internal/queue"
 	"sync"
 	"time"
 
@@ -21,8 +22,6 @@ import (
 type Bot struct {
 	stopChan      chan struct{} // Channel to signal listener to stop
 	mutex         sync.Mutex    // 互斥锁，用于保护共享状态
-	isBuying      bool          // State to prevent multiple buys
-	isBought      bool          // State to track if a token has been bought in a cycle
 	ctx           context.Context
 	cancelFunc    context.CancelFunc
 	workerPool    chan struct{}           // 工作池通道，用于限制并发工作线程数
@@ -37,8 +36,6 @@ func NewBot() *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
 		stopChan:      make(chan struct{}),
-		isBuying:      false,
-		isBought:      false,
 		ctx:           ctx,
 		cancelFunc:    cancel,
 		workerPool:    make(chan struct{}, 26),     // 创建容量为26的工作池
@@ -256,51 +253,6 @@ func fetchMetadata(uri string) (*model.TokenMetadata, error) {
 	return &metadata, nil
 }
 
-// 买入代币
-func (b *Bot) buyToken(tokenAddress string, tokenSymbol string, tokenName string, tokenURI string) {
-	b.mutex.Lock()
-	if b.isBuying || b.isBought {
-		b.mutex.Unlock()
-		log.Printf("已在买入状态或已买过代币，跳过买入 %s", tokenAddress)
-		return
-	}
-
-	b.isBuying = true
-	b.mutex.Unlock()
-
-	// TODO: 计算实际要买入的金额
-	buyAmount := 0.1 // 示例金额: 0.1 SOL
-	price := 1.0     // 示例价格
-
-	// 获取当前WebSocket连接
-	wsConn := b.GetWebSocketConn()
-
-	// 使用交易执行器执行买入操作并订阅价格
-	var err error
-	if wsConn != nil {
-		// 先订阅代币交易
-		if subErr := b.SubscribeToTokenTrade(tokenAddress); subErr != nil {
-			log.Printf("订阅代币 %s 交易失败: %v", tokenAddress, subErr)
-		}
-
-		// 买入代币
-		err = b.tradeExecutor.BuyToken(tokenAddress, tokenSymbol, buyAmount, price, 6)
-	} else {
-		log.Printf("WebSocket连接未建立，将使用不订阅价格的方式买入代币")
-		err = b.tradeExecutor.BuyToken(tokenAddress, tokenSymbol, buyAmount, price, 6)
-	}
-
-	b.mutex.Lock()
-	b.isBuying = false
-	if err == nil {
-		b.isBought = true
-		log.Printf("成功买入代币 %s (%s)", tokenAddress, tokenName)
-	} else {
-		log.Printf("买入代币 %s (%s) 失败: %v", tokenAddress, tokenName, err)
-	}
-	b.mutex.Unlock()
-}
-
 // 处理新代币的工作线程
 func (b *Bot) processNewToken(data map[string]interface{}) {
 	// 在工作线程启动前获取工作池槽位
@@ -372,43 +324,27 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 			return
 		} else {
 			log.Printf("代币 %s (%s) 满足筛选条件，准备购买", tokenAddress, metadata.Name)
-
-			// 使用代币名称和符号（优先使用元数据中的信息）
-			tokenSymbolToUse := metadata.Symbol
-			if tokenSymbolToUse == "" {
-				tokenSymbolToUse = tokenSymbol
+			_, err := b.buyToken(tokenAddress, 0.01, true, 10, 0.0005, "pump")
+			if err != nil {
+				log.Printf("购买代币 %s 失败,error: %v", err)
 			}
 
-			tokenNameToUse := metadata.Name
-			if tokenNameToUse == "" {
-				tokenNameToUse = tokenName
-			}
-
-			// 创建购买消息并发送到购买队列
-			buyMsg := model.NewBuyMessage(
-				tokenAddress,
-				tokenSymbolToUse,
-				tokenNameToUse,
-				tokenURI,
-			)
-
-			// 添加元数据信息到额外数据
-			buyMsg.ExtraData["description"] = metadata.Description
-			if metadata.Twitter != "" {
-				buyMsg.ExtraData["twitter"] = metadata.Twitter
-			}
-			if metadata.Website != "" {
-				buyMsg.ExtraData["website"] = metadata.Website
-			}
-
-			// 发送到购买队列
-			queue.GetBuyQueue().SendMessage(buyMsg)
 		}
 	} else {
 		log.Printf("代币 %s 缺少元数据URI，无法进行筛选", tokenAddress)
 	}
 
 	log.Printf("工作线程完成处理代币: %s", tokenAddress)
+}
+
+func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
+	sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+	if err != nil {
+		log.Printf("购买代币 %s 失败,error: %v", err)
+		return "", err
+	}
+	err = subscribeToTokenTrades(b.wsConn, []string{mint})
+	return sign, err
 }
 
 // 订阅新代币创建事件
@@ -475,12 +411,4 @@ func (b *Bot) Close() {
 	// 等待所有工作线程完成
 	b.workerWg.Wait()
 	log.Println("所有工作线程已完成，Bot已关闭")
-}
-
-// ResetBuyState 重置购买状态，开始新的购买周期
-func (b *Bot) ResetBuyState() {
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
-	b.isBought = false
-	log.Println("已重置购买状态，可以开始新的购买周期")
 }

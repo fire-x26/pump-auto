@@ -1,4 +1,4 @@
-package chainTx
+package main
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"pump_auto/internal/common"
 	"strings"
 
 	"github.com/gagliardetto/solana-go"
@@ -33,19 +32,38 @@ func init() {
 	}
 }
 
+type TradeAction string
+
+const (
+	BUY  TradeAction = "buy"
+	SELL TradeAction = "sell"
+)
+
+type PoolType string
+
+const (
+	AUTO         PoolType = "auto"
+	PUMP         PoolType = "pump"
+	RAYDIUM      PoolType = "raydium"
+	PUMP_AMM     PoolType = "pump-amm"
+	LAUNCHLAB    PoolType = "launchlab"
+	RAYDIUM_CPMM PoolType = "raydium-cpmm"
+	BONK         PoolType = "bonk"
+)
+
 // params
 type TradeRequest struct {
-	PublicKey        string             `json:"publicKey"`
-	Action           common.TradeAction `json:"action"`
-	Mint             string             `json:"mint"`
-	Amount           float64            `json:"amount"`
-	DenominatedInSol string             `json:"denominatedInSol"`
-	Slippage         int                `json:"slippage"`
-	PriorityFee      float64            `json:"priorityFee"`
-	Pool             common.PoolType    `json:"pool"`
+	PublicKey        string      `json:"publicKey"`
+	Action           TradeAction `json:"action"`
+	Mint             string      `json:"mint"`
+	Amount           string      `json:"amount"`
+	DenominatedInSol string      `json:"denominatedInSol"`
+	Slippage         int         `json:"slippage"`
+	PriorityFee      float64     `json:"priorityFee"`
+	Pool             PoolType    `json:"pool"`
 }
 
-func ExecuteTrade(action common.TradeAction, mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
+func ExecuteTrade(action TradeAction, mint string, amountPercent string, denominatedInSol bool, slippage int, priorityFee float64, pool PoolType) (string, error) {
 	// 解析私钥（只解析一次）
 	privateKey, err := solana.PrivateKeyFromBase58(PRIVATE_KEY)
 	if err != nil {
@@ -58,7 +76,7 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, denomi
 		PublicKey:        publicKey.String(),
 		Action:           action,
 		Mint:             mint,
-		Amount:           amount,
+		Amount:           amountPercent,
 		DenominatedInSol: fmt.Sprintf("%t", denominatedInSol),
 		Slippage:         slippage,
 		PriorityFee:      priorityFee,
@@ -70,7 +88,7 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, denomi
 	data.Set("publicKey", request.PublicKey)
 	data.Set("action", string(request.Action))
 	data.Set("mint", request.Mint)
-	data.Set("amount", fmt.Sprintf("%f", request.Amount))
+	data.Set("amount", request.Amount) // 直接使用 amountPercent 字符串
 	data.Set("denominatedInSol", request.DenominatedInSol)
 	data.Set("slippage", fmt.Sprintf("%d", request.Slippage))
 	data.Set("priorityFee", fmt.Sprintf("%f", request.PriorityFee))
@@ -86,15 +104,26 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, denomi
 	}
 	defer resp.Body.Close()
 
+	// 检查响应状态码
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
 	transactionBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %v", err)
 	}
 
+	// 验证交易数据
+	if len(transactionBytes) == 0 {
+		return "", fmt.Errorf("收到空的交易数据")
+	}
+
 	// 解析并签名交易
 	tx, err := solana.TransactionFromBytes(transactionBytes)
 	if err != nil {
-		return "", fmt.Errorf("解析交易失败: %v", err)
+		return "", fmt.Errorf("解析交易失败: %v, 交易数据长度: %d", err, len(transactionBytes))
 	}
 
 	// 获取最新区块哈希
@@ -130,9 +159,22 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, denomi
 	return txSign.String(), nil
 }
 
-func BuyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
-	return ExecuteTrade(common.BUY, mint, amount, denominatedInSol, slippage, priorityFee, pool)
+func SellToken(mint string, amountPercent string, denominatedInSol bool, slippage int, priorityFee float64, pool PoolType) (string, error) {
+	return ExecuteTrade(SELL, mint, amountPercent, denominatedInSol, slippage, priorityFee, pool)
 }
-func SellToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
-	return ExecuteTrade(common.SELL, mint, amount, denominatedInSol, slippage, priorityFee, pool)
+
+func main() {
+	mint := "FNvBEEWXmEQJG4Kg7UEg3LpXLDTkE8h7Z4fywTaJpump"
+	amount := "100%"
+	denominatedInSol := false
+	slippage := 10
+	priorityFee := 0.0005
+	pool := PUMP
+
+	txSignature, err := SellToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+	if err != nil {
+		log.Printf("交易失败: %v", err)
+		return
+	}
+	log.Printf("交易成功: https://solscan.io/tx/%s", txSignature)
 }

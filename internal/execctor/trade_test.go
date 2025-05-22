@@ -212,11 +212,9 @@ func TestFixedQueueFallStop(t *testing.T) {
 	t.Run("队列头尾价格差超过5%触发止损", func(t *testing.T) {
 		// 获取填充队列后的状态
 		info = executor.GetTradeInfo(tokenAddress)
-		queueHeadPrice := info.RecentPrices[0].Price
 
 		// 模拟价格快速下跌10%
 		// 从队列最高点下跌10%应该触发止损
-		executor.UpdatePrice(tokenAddress, queueHeadPrice*0.90)
 
 		// 执行策略检查
 		executor.checkAndExecuteStrategies(tokenAddress)
