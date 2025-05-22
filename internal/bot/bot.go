@@ -11,6 +11,7 @@ import (
 	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
+	"pump_auto/internal/ws"
 	"sync"
 	"time"
 
@@ -27,8 +28,6 @@ type Bot struct {
 	workerPool    chan struct{}           // 工作池通道，用于限制并发工作线程数
 	workerWg      sync.WaitGroup          // 等待组，用于等待所有工作线程完成
 	tradeExecutor *execctor.TradeExecutor // 交易执行器
-	wsConn        *websocket.Conn         // WebSocket连接
-	wsMutex       sync.Mutex              // 保护WebSocket连接的锁
 }
 
 // 创建新的Bot实例
@@ -43,35 +42,25 @@ func NewBot() *Bot {
 	}
 }
 
-// 获取当前WebSocket连接
-func (b *Bot) GetWebSocketConn() *websocket.Conn {
-	b.wsMutex.Lock()
-	defer b.wsMutex.Unlock()
-	return b.wsConn
-}
-
 // SubscribeToTokenTrade 订阅代币交易
 func (b *Bot) SubscribeToTokenTrade(tokenAddress string) error {
-	b.wsMutex.Lock()
-	ws := b.wsConn
-	b.wsMutex.Unlock()
-
-	if ws == nil {
-		return fmt.Errorf("WebSocket连接未建立")
-	}
-
-	return subscribeToTokenTrades(ws, []string{tokenAddress})
+	return ws.SubscribeToTokenTrades([]string{tokenAddress})
 }
 
 // 修改监听实现代码
 func (b *Bot) RunListener() error {
 	log.Println("开始监听pump.fun上的新池...")
 
-	// 添加重连逻辑
-	maxRetries := 5
-	retryCount := 0
-	retryDelay := time.Second * 3
+	// 初始化全局WebSocket连接
+	if err := ws.InitGlobalWS(); err != nil {
+		return fmt.Errorf("初始化WebSocket连接失败: %w", err)
+	}
 
+	// 连续超时计数
+	consecutiveTimeouts := 0
+	maxConsecutiveTimeouts := 3
+
+	// 消息处理循环
 	for {
 		select {
 		case <-b.ctx.Done():
@@ -79,150 +68,90 @@ func (b *Bot) RunListener() error {
 			b.workerWg.Wait()
 			return nil
 		default:
-			// 建立连接
-			log.Println("正在连接到WebSocket服务...")
-			ws, _, err := websocket.DefaultDialer.Dial("wss://pumpportal.fun/api/data", nil)
+			wsConn := ws.GetGlobalWS()
+			if wsConn == nil {
+				log.Println("WebSocket连接未建立，尝试重新连接...")
+				if err := ws.InitGlobalWS(); err != nil {
+					log.Printf("重新连接WebSocket失败: %v", err)
+					time.Sleep(time.Second * 3)
+					continue
+				}
+				continue
+			}
+
+			// 读取消息
+			_, message, err := wsConn.ReadMessage()
 			if err != nil {
-				retryCount++
-				if retryCount > maxRetries {
-					return fmt.Errorf("连接WebSocket服务失败，已达到最大重试次数: %w", err)
+				if websocket.IsUnexpectedCloseError(err) {
+					log.Printf("WebSocket连接已关闭: %v, 将重新连接", err)
+					continue
 				}
-				log.Printf("连接WebSocket服务失败: %v, 将在 %v 后重试 (%d/%d)", err, retryDelay, retryCount, maxRetries)
-				time.Sleep(retryDelay)
+
+				// 检查是否是超时错误
+				if err.Error() == "i/o timeout" || err.Error() == "read tcp: i/o timeout" {
+					consecutiveTimeouts++
+					if consecutiveTimeouts >= maxConsecutiveTimeouts {
+						log.Printf("连续超时次数过多: %d/%d, 将重新连接", consecutiveTimeouts, maxConsecutiveTimeouts)
+						continue
+					}
+					log.Printf("读取消息超时 (%d/%d), 继续尝试...", consecutiveTimeouts, maxConsecutiveTimeouts)
+					continue
+				}
+
+				// 其他错误
+				log.Printf("读取消息出错: %v", err)
 				continue
 			}
 
-			// 保存WebSocket连接
-			b.wsMutex.Lock()
-			b.wsConn = ws
-			b.wsMutex.Unlock()
+			// 成功读取，重置超时计数
+			consecutiveTimeouts = 0
 
-			// 重置重试计数
-			retryCount = 0
-			log.Println("成功连接到pumpportal.fun WebSocket API")
-
-			// 设置关闭处理函数
-			defer func() {
-				b.wsMutex.Lock()
-				if b.wsConn != nil {
-					if err := b.wsConn.Close(); err != nil {
-						log.Printf("关闭WebSocket连接失败: %v", err)
-					} else {
-						log.Println("WebSocket连接已正常关闭")
-					}
-					b.wsConn = nil
-				}
-				b.wsMutex.Unlock()
-			}()
-
-			// 2. 订阅新代币创建事件
-			if err := subscribeToNewTokens(ws); err != nil {
-				log.Printf("订阅新代币事件失败: %v, 将重新连接", err)
-				// 关闭当前连接并重新开始
-				ws.Close()
-				b.wsMutex.Lock()
-				b.wsConn = nil
-				b.wsMutex.Unlock()
-				time.Sleep(retryDelay)
+			// 处理收到的消息
+			var data map[string]interface{}
+			if err := json.Unmarshal(message, &data); err != nil {
+				log.Printf("解析消息失败: %v", err)
 				continue
 			}
 
-			// 连续超时计数
-			consecutiveTimeouts := 0
-			maxConsecutiveTimeouts := 3
+			// 以更易读的方式打印消息
+			if _, ok := data["method"]; !ok {
+				// 解析为TokenEvent结构体，用于判断消息类型
+				var tokenEvent model.TokenEvent
+				if err := json.Unmarshal(message, &tokenEvent); err != nil {
+					log.Printf("解析为TokenEvent失败: %v", err)
+					continue
+				}
 
-			// 消息处理循环
-		messageLoop:
-			for {
-				select {
-				case <-b.ctx.Done():
-					// 等待所有工作线程完成
-					b.workerWg.Wait()
-					return nil
-				default:
-					// 读取消息
-					_, message, err := ws.ReadMessage()
-					if err != nil {
-						if websocket.IsUnexpectedCloseError(err) {
-							log.Printf("WebSocket连接已关闭: %v, 将重新连接", err)
-							break messageLoop
-						}
+				// 如果是交易记录消息(buy或sell)，则转发给交易执行器更新价格
+				if tokenEvent.TxType == "buy" || tokenEvent.TxType == "sell" {
+					b.tradeExecutor.ProcessTradeMessage(message)
+				}
 
-						// 检查是否是超时错误
-						if err.Error() == "i/o timeout" || err.Error() == "read tcp: i/o timeout" ||
-							err.Error() == "read tcp 10.10.15.196:60029->35.194.64.63:443: i/o timeout" {
-							consecutiveTimeouts++
-							if consecutiveTimeouts >= maxConsecutiveTimeouts {
-								log.Printf("连续超时次数过多: %d/%d, 将重新连接", consecutiveTimeouts, maxConsecutiveTimeouts)
-								break messageLoop
-							}
-							log.Printf("读取消息超时 (%d/%d), 继续尝试...", consecutiveTimeouts, maxConsecutiveTimeouts)
-							continue
-						}
+				// 格式化打印消息
+				formattedMsg := model.FormatTokenEvent(message)
+				log.Println(formattedMsg)
 
-						// 其他错误
-						log.Printf("读取消息出错: %v", err)
-						continue
+				// 检查是否是新代币创建事件(txType=create)
+				if tokenEvent.TxType == "create" {
+					// 将tokenEvent转换为map，以便与现有代码兼容
+					tokenData := map[string]interface{}{
+						"params": map[string]interface{}{
+							"address": tokenEvent.Mint,
+							"uri":     tokenEvent.Uri,
+						},
+						"name":   tokenEvent.Name,
+						"symbol": tokenEvent.Symbol,
 					}
 
-					// 成功读取，重置超时计数
-					consecutiveTimeouts = 0
-
-					// 处理收到的消息
-					var data map[string]interface{}
-					if err := json.Unmarshal(message, &data); err != nil {
-						log.Printf("解析消息失败: %v", err)
-						continue
-					}
-
-					// 以更易读的方式打印消息
-					if _, ok := data["method"]; !ok {
-						// 解析为TokenEvent结构体，用于判断消息类型
-						var tokenEvent model.TokenEvent
-						if err := json.Unmarshal(message, &tokenEvent); err != nil {
-							log.Printf("解析为TokenEvent失败: %v", err)
-							continue
-						}
-
-						// 如果是交易记录消息(buy或sell)，则转发给交易执行器更新价格
-						if tokenEvent.TxType == "buy" || tokenEvent.TxType == "sell" {
-							b.tradeExecutor.ProcessTradeMessage(message)
-						}
-
-						// 格式化打印消息
-						formattedMsg := model.FormatTokenEvent(message)
-						log.Println(formattedMsg)
-
-						// 检查是否是新代币创建事件(txType=create)
-						if tokenEvent.TxType == "create" {
-							// 将tokenEvent转换为map，以便与现有代码兼容
-							tokenData := map[string]interface{}{
-								"params": map[string]interface{}{
-									"address": tokenEvent.Mint,
-									"uri":     tokenEvent.Uri,
-								},
-								"name":   tokenEvent.Name,
-								"symbol": tokenEvent.Symbol,
-							}
-
-							// 在协程中处理，避免阻塞主消息循环
-							go b.processNewToken(tokenData)
-						}
-					} else {
-						// 处理系统消息或订阅确认消息
-						if method, ok := data["method"].(string); ok {
-							log.Printf("收到系统消息: %s", method)
-						}
-					}
+					// 在协程中处理，避免阻塞主消息循环
+					go b.processNewToken(tokenData)
+				}
+			} else {
+				// 处理系统消息或订阅确认消息
+				if method, ok := data["method"].(string); ok {
+					log.Printf("收到系统消息: %s", method)
 				}
 			}
-
-			// 连接断开或需要重连，等待一段时间再尝试
-			log.Println("准备重新连接WebSocket服务...")
-			b.wsMutex.Lock()
-			b.wsConn = nil
-			b.wsMutex.Unlock()
-			time.Sleep(retryDelay)
 		}
 	}
 }
@@ -324,9 +253,18 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 			return
 		} else {
 			log.Printf("代币 %s (%s) 满足筛选条件，准备购买", tokenAddress, metadata.Name)
-			_, err := b.buyToken(tokenAddress, 0.01, true, 10, 0.0005, "pump")
+			req := &common.TradeReq{
+				Action:           "buy",
+				Mint:             tokenAddress,
+				Amount:           0.001,
+				DenominatedInSol: true,
+				Slippage:         10,
+				PriorityFee:      0.0005,
+				Pool:             common.PUMP,
+			}
+			_, err := b.buyToken(req.Mint, req.Amount, req.DenominatedInSol, req.Slippage, req.PriorityFee, req.Pool)
 			if err != nil {
-				log.Printf("购买代币 %s 失败,error: %v", err)
+				log.Printf("购买代币 %s 失败,error: %v", tokenAddress, err)
 			}
 
 		}
@@ -340,10 +278,10 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
 	if err != nil {
-		log.Printf("购买代币 %s 失败,error: %v", err)
+		log.Printf("购买代币 %s 失败,error: %v", mint, err)
 		return "", err
 	}
-	err = subscribeToTokenTrades(b.wsConn, []string{mint})
+	err = ws.SubscribeToTokenTrades([]string{mint})
 	return sign, err
 }
 
@@ -385,6 +323,15 @@ func subscribeToTokenTrades(ws *websocket.Conn, tokens []string) error {
 	return sendSubscription(ws, payload)
 }
 
+func unsubscribeToTokenTrades(ws *websocket.Conn, tokens []string) error {
+	payload := map[string]interface{}{
+		"method": "unsubscribeTokenTrade",
+		"keys":   tokens,
+	}
+
+	return sendSubscription(ws, payload)
+}
+
 // 发送订阅请求
 func sendSubscription(ws *websocket.Conn, payload map[string]interface{}) error {
 	data, err := json.Marshal(payload)
@@ -407,6 +354,9 @@ func (b *Bot) Close() {
 
 	// 停止交易执行器
 	b.tradeExecutor.Stop()
+
+	// 关闭全局WebSocket连接
+	ws.Close()
 
 	// 等待所有工作线程完成
 	b.workerWg.Wait()
