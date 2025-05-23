@@ -2,6 +2,7 @@ package chainTx
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,9 @@ import (
 	"pump_auto/internal/common"
 	"strconv"
 	"strings"
+
+	"github.com/davecgh/go-spew/spew"
+	bin "github.com/gagliardetto/binary"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/programs/token"
@@ -128,16 +132,16 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 		return "", fmt.Errorf("解析交易失败: %v", err)
 	}
 
-	// 添加详细日志
-	log.Printf("交易详情:")
-	log.Printf("- 交易指令数量: %d", len(tx.Message.Instructions))
-	log.Printf("- 交易账户数量: %d", len(tx.Message.AccountKeys))
+	// // 添加详细日志
+	// log.Printf("交易详情:")
+	// log.Printf("- 交易指令数量: %d", len(tx.Message.Instructions))
+	// log.Printf("- 交易账户数量: %d", len(tx.Message.AccountKeys))
 
-	// 首先打印所有账户
-	log.Printf("交易账户列表:")
-	for i, acc := range tx.Message.AccountKeys {
-		log.Printf("- 账户 %d: %s", i, acc.String())
-	}
+	// // 首先打印所有账户
+	// log.Printf("交易账户列表:")
+	// for i, acc := range tx.Message.AccountKeys {
+	// 	log.Printf("- 账户 %d: %s", i, acc.String())
+	// }
 
 	// 获取最新区块哈希
 	client := rpc.New(RPC_URL)
@@ -262,4 +266,108 @@ func GetTokenBalance(mint string) (float64, error) {
 
 	log.Printf("代币 %s 余额: %f", mint, result)
 	return result, nil
+}
+func ParseTxSign(txSig solana.Signature) (float64, error) {
+	client := rpc.New(RPC_URL)
+	var maxVersion uint64 = 0
+
+	// 使用Base64编码获取交易数据
+	out, err := client.GetTransaction(
+		context.Background(),
+		txSig,
+		&rpc.GetTransactionOpts{
+			Encoding:                       solana.EncodingBase64,
+			MaxSupportedTransactionVersion: &maxVersion,
+		},
+	)
+	if err != nil {
+		fmt.Printf("查询交易失败: %v\n", err)
+		return 0, err
+	}
+
+	// 解码交易
+	decodedTx, err := solana.TransactionFromDecoder(bin.NewBinDecoder(out.Transaction.GetBinary()))
+	if err != nil {
+		fmt.Printf("解码交易失败: %v\n", err)
+		return 0, err
+	}
+
+	// 获取交易元数据
+	meta, err := client.GetTransaction(
+		context.Background(),
+		txSig,
+		&rpc.GetTransactionOpts{
+			Encoding:                       solana.EncodingBase64,
+			MaxSupportedTransactionVersion: &maxVersion,
+		},
+	)
+	if err != nil {
+		fmt.Printf("获取交易元数据失败: %v\n", err)
+		return 0, err
+	}
+
+	// 检查元数据
+	if meta.Meta == nil {
+		fmt.Println("交易元数据为空")
+		return 0, err
+	}
+
+	// 查找第4条指令的内嵌指令（索引 3）
+	var innerInstructions []solana.CompiledInstruction
+	for _, inner := range meta.Meta.InnerInstructions {
+		if inner.Index == 3 { // 第4条指令的内嵌指令
+			innerInstructions = inner.Instructions
+			break
+		}
+	}
+
+	if len(innerInstructions) == 0 {
+		fmt.Println("第4条指令没有内嵌指令")
+		return 0, err
+	}
+
+	if len(innerInstructions) < 1 {
+		fmt.Printf("内嵌指令数量不足，期望至少 1 条，实际 %d 条\n", len(innerInstructions))
+		return 0, err
+	}
+
+	// 提取第1条内嵌指令（索引 0）
+	targetInnerInstruction := innerInstructions[0]
+	fmt.Println("第4条指令的第1条内嵌指令:")
+	spew.Dump(targetInnerInstruction)
+
+	// 检查账户数量
+	if len(targetInnerInstruction.Accounts) < 5 {
+		fmt.Printf("内嵌指令账户数量不足，期望至少 5 个，实际 %d 个\n", len(targetInnerInstruction.Accounts))
+		return 0, err
+	}
+	// 映射账户到 PumpfunBuyInstruction
+	pumpfunInstruction := common.PumpfunBuyInstruction{
+		Mint: decodedTx.Message.AccountKeys[targetInnerInstruction.Accounts[2]],
+		User: decodedTx.Message.AccountKeys[targetInnerInstruction.Accounts[6]],
+	}
+
+	// 解析指令数据
+	data := targetInnerInstruction.Data
+	if len(data) < 16 { // 确保数据长度足够
+		fmt.Printf("指令数据长度不足，期望至少 16 字节，实际 %d 字节\n", len(data))
+		return 0, err
+	}
+
+	// 解析 AmountOut
+	buyInstruction := common.BuyInstruction{
+		Amount:     binary.LittleEndian.Uint64(data[8:16]),
+		MaxSolCost: binary.LittleEndian.Uint64(data[16:24]),
+	}
+	pumpfunInstruction.Input = &buyInstruction
+
+	// 打印解析结果
+	fmt.Println("解析的 PumpfunBuyInstruction（内嵌指令）:")
+	spew.Dump(pumpfunInstruction)
+
+	// 格式化输出
+	fmt.Printf("Token: %s\n", pumpfunInstruction.Mint)
+	fmt.Printf("User Wallet: %s\n", pumpfunInstruction.User)
+	fmt.Printf("AmountOut: %d (%.6f tokens, 精度 6)\n", buyInstruction.Amount, float64(buyInstruction.Amount)/1_000_000)
+	return float64(buyInstruction.Amount) / 1_000_000, nil
 }

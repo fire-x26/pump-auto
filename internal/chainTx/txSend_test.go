@@ -3,6 +3,8 @@ package chainTx
 import (
 	"pump_auto/internal/common"
 	"testing"
+
+	"github.com/gagliardetto/solana-go"
 )
 
 func TestBuyToken(t *testing.T) {
@@ -66,7 +68,7 @@ func TestSellToken(t *testing.T) {
 	}{
 		{
 			name:             "正常卖出测试",
-			mint:             "45Xxq2nrxLA2cy4AJKkKyiYqKyKVqcCtdy7j1kNqpump", // SOL代币地址
+			mint:             "CRRH9C72fmpZfPMQ2fSA8Z2AGC4VkFfxUrTCRDuipump", // SOL代币地址
 			amount:           1,
 			sellPercent:      "100%",
 			denominatedInSol: false,
@@ -184,6 +186,49 @@ func TestGetTokenDecimal(t *testing.T) {
 			}
 			// 打印精度信息用于调试
 			t.Logf("代币 %s 的精度为: %d", tt.mint, got)
+		})
+	}
+}
+
+func TestParseTxSign(t *testing.T) {
+	tests := []struct {
+		name    string
+		txHash  string
+		wantErr bool
+	}{
+		{
+			name:    "正常交易哈希",
+			txHash:  "4APVY1su7T5RqEBZQpHTHxqUbm6YvmboB8FLXnVtS7zqzQrb25tDCWJBSzwhjdEVRXM6HpiLC4G6tSA8r4J3iztB", // 请替换为真实可用的交易哈希
+			wantErr: false,
+		},
+		{
+			name:    "无效交易哈希",
+			txHash:  "invalid_hash",
+			wantErr: true,
+		},
+		{
+			name:    "空交易哈希",
+			txHash:  "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var err error
+			if tt.txHash == "" {
+				_, err = ParseTxSign(solana.Signature{})
+			} else {
+				sig, sigErr := solana.SignatureFromBase58(tt.txHash)
+				if sigErr != nil {
+					err = sigErr
+				} else {
+					_, err = ParseTxSign(sig)
+				}
+			}
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseTxSign() error = %v, wantErr %v", err, tt.wantErr)
+			}
 		})
 	}
 }

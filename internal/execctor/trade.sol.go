@@ -252,7 +252,7 @@ func (t *TradeExecutor) checkTakeProfit(track *PriceTrackInfo, tokenAddress stri
 
 // 此函数在调用时，track 应已被锁定
 func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, SoldPercent float64, tokenAddress string, sellAmount float64, sellPercent string, denominatedInSol bool, slippage int, priorityFee float64, poolType common.PoolType) { // amount 类型改为 *big.Int
-	if sellAmount <= 0 {                                                                                                                                                                                                                        // 避免卖出0或负数数量
+	if sellAmount <= 0 { // 避免卖出0或负数数量
 		log.Printf("尝试卖出 %s 的数量 %s 过小或为0，取消卖出", tokenAddress, sellAmount)
 		return
 	}

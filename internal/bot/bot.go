@@ -17,8 +17,25 @@ import (
 
 	"pump_auto/internal/analyzer"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/gorilla/websocket"
 )
+
+// PumpfunBuyInstruction 表示 Pumpfun 程序的购买指令
+type PumpfunBuyInstruction struct {
+	Token                  solana.PublicKey
+	Signer                 solana.PublicKey
+	BondingCurve           solana.PublicKey
+	AssociatedBondingCurve solana.PublicKey
+	UserWallet             solana.PublicKey
+	Input                  *BuyInstruction
+}
+
+// BuyInstruction 表示购买指令的具体参数
+type BuyInstruction struct {
+	MaxAmountIn uint64
+	AmountOut   uint64
+}
 
 type Bot struct {
 	stopChan      chan struct{} // Channel to signal listener to stop
@@ -297,19 +314,19 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 	}
 	b.mutex.Unlock()
 
-	// sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
-	// if err != nil {
-	// 	log.Printf("购买代币 %s 失败,error: %v\", mint, err)
-	// 	return "", err
-	// }
-	// 假设购买成功，将代币添加到持有列表
-	// 在实际的购买逻辑成功后再执行此操作
-	// wsConn := ws.GetGlobalWS() // This line was removed in a previous step, ensure it's not needed or handled by ws.SubscribeToTokenTrades
-	// if wsConn == nil {
-	// return "", fmt.Errorf("WebSocket连接未建立，无法购买代币 %s", mint)
-	// }
+	sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+	if err != nil {
+		log.Printf("购买代币 %s 失败,error: %v", mint, err)
+		return "", err
+	}
+
+	wsConn := ws.GetGlobalWS()
+	if wsConn == nil {
+		return "", fmt.Errorf("WebSocket连接未建立，无法购买代币 %s", mint)
+	}
 	b.heldTokens[mint] = struct{}{}
-	outAmount, err := chainTx.GetTokenBalance(mint)
+	txSig := solana.MustSignatureFromBase58(sign)
+	outAmount, err := chainTx.ParseTxSign(txSig)
 	if err != nil {
 		log.Printf("获取代币 %s 余额失败: %v", mint, err)
 		return "", fmt.Errorf("获取代币余额失败: %v", err)
@@ -325,9 +342,8 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 
 		// 'amount' is the SOL amount intended to be spent
 		b.tradeExecutor.ExpectBuyForToken(mint, amount, outAmount)
-
 	}
-	return "", err
+	return sign, err
 }
 
 // RemoveHeldToken 从持有代币列表中移除代币
