@@ -11,11 +11,11 @@ import (
 )
 
 var (
-	globalWS     *websocket.Conn
-	wsMutex      sync.Mutex
-	stopChan     chan struct{}
+	globalWS       *websocket.Conn
+	wsMutex        sync.Mutex
+	stopChan       chan struct{}
 	reconnectDelay = time.Second * 3
-	maxRetries    = 5
+	maxRetries     = 5
 )
 
 // InitGlobalWS 初始化全局WebSocket连接

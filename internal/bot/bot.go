@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"pump_auto/internal/chainTx"
 	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
@@ -28,18 +27,21 @@ type Bot struct {
 	workerPool    chan struct{}           // 工作池通道，用于限制并发工作线程数
 	workerWg      sync.WaitGroup          // 等待组，用于等待所有工作线程完成
 	tradeExecutor *execctor.TradeExecutor // 交易执行器
+	heldTokens    map[string]struct{}     // 新增字段：用于跟踪持有的代币
 }
 
 // 创建新的Bot实例
 func NewBot() *Bot {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Bot{
-		stopChan:      make(chan struct{}),
-		ctx:           ctx,
-		cancelFunc:    cancel,
-		workerPool:    make(chan struct{}, 26),     // 创建容量为26的工作池
-		tradeExecutor: execctor.NewTradeExecutor(), // 创建交易执行器
+	b := &Bot{
+		stopChan:   make(chan struct{}),
+		ctx:        ctx,
+		cancelFunc: cancel,
+		workerPool: make(chan struct{}, 2),    // 修改此处，创建容量为2的工作池
+		heldTokens: make(map[string]struct{}), // 初始化持有的代币
 	}
+	b.tradeExecutor = execctor.NewTradeExecutor(b.RemoveHeldToken) // 创建交易执行器并传入回调
+	return b
 }
 
 // SubscribeToTokenTrade 订阅代币交易
@@ -157,8 +159,23 @@ func (b *Bot) RunListener() error {
 }
 
 func fetchMetadata(uri string) (*model.TokenMetadata, error) {
+	// 创建自定义的 HTTP 客户端
+	client := &http.Client{
+		Timeout: 30 * time.Second, // 设置30秒超时
+	}
+
+	// 创建新的请求
+	req, err := http.NewRequest("GET", uri, nil)
+	if err != nil {
+		log.Printf("创建HTTP请求失败: %v", err)
+		return nil, err
+	}
+
+	// 设置 User-Agent，模拟浏览器行为
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
 	// 发起HTTP请求获取元数据
-	resp, err := http.Get(uri)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("HTTP请求失败: %v", err)
 		return nil, err
@@ -262,6 +279,7 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 				PriorityFee:      0.0005,
 				Pool:             common.PUMP,
 			}
+			time.Sleep(5 * time.Second)
 			_, err := b.buyToken(req.Mint, req.Amount, req.DenominatedInSol, req.Slippage, req.PriorityFee, req.Pool)
 			if err != nil {
 				log.Printf("购买代币 %s 失败,error: %v", tokenAddress, err)
@@ -276,13 +294,38 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 }
 
 func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
-	sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
-	if err != nil {
-		log.Printf("购买代币 %s 失败,error: %v", mint, err)
-		return "", err
+	b.mutex.Lock()
+	if len(b.heldTokens) >= 2 {
+		b.mutex.Unlock()
+		log.Printf("已持有最大数量的代币 (2)，无法购买新的代币 %s", mint)
+		return "", fmt.Errorf("已持有最大数量的代币 (2)，无法购买新的代币 %s", mint)
 	}
-	err = ws.SubscribeToTokenTrades([]string{mint})
-	return sign, err
+	b.mutex.Unlock()
+
+	// sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+	// if err != nil {
+	// 	log.Printf("购买代币 %s 失败,error: %v\", mint, err)
+	// 	return "", err
+	// }
+	// 假设购买成功，将代币添加到持有列表
+	// 在实际的购买逻辑成功后再执行此操作
+
+	err := ws.SubscribeToTokenTrades([]string{mint})
+	if err == nil {
+		b.mutex.Lock()
+		b.heldTokens[mint] = struct{}{}
+		b.mutex.Unlock()
+		log.Printf("成功购买代币 %s 并添加到持有列表", mint)
+	}
+	return "", err
+}
+
+// RemoveHeldToken 从持有代币列表中移除代币
+func (b *Bot) RemoveHeldToken(tokenAddress string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	delete(b.heldTokens, tokenAddress)
+	log.Printf("代币 %s 已从持有列表移除", tokenAddress)
 }
 
 // 订阅新代币创建事件

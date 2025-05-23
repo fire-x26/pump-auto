@@ -85,13 +85,14 @@ type TradeExecutor struct {
 	priceTracks map[string]*PriceTrackInfo // 价格跟踪，按代币地址索引
 	mutex       sync.RWMutex               // 保护priceTracks的锁
 	// stopLossRule    StopLossSetting            // 移动止损规则 - 当前策略下不直接使用其参数
-	ctx             context.Context    // 上下文
-	cancel          context.CancelFunc // 取消函数
-	triggeredLevels map[string]bool    // 已触发的止盈级别
+	ctx             context.Context           // 上下文
+	cancel          context.CancelFunc        // 取消函数
+	triggeredLevels map[string]bool           // 已触发的止盈级别
+	onTokenSold     func(tokenAddress string) // 新增字段：代币售出后的回调函数
 }
 
 // 创建新的交易执行器
-func NewTradeExecutor() *TradeExecutor {
+func NewTradeExecutor(onTokenSoldCallback func(tokenAddress string)) *TradeExecutor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TradeExecutor{
@@ -99,6 +100,7 @@ func NewTradeExecutor() *TradeExecutor {
 		ctx:             ctx,
 		cancel:          cancel,
 		triggeredLevels: make(map[string]bool),
+		onTokenSold:     onTokenSoldCallback, // 保存回调函数
 	}
 }
 
@@ -227,7 +229,7 @@ func (t *TradeExecutor) checkTakeProfit(track *PriceTrackInfo, tokenAddress stri
 // 此函数在调用时，track 应已被锁定
 func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, SoldPercent float64, tokenAddress string, sellAmount float64, sellPercent string, denominatedInSol bool, slippage int, priorityFee float64, poolType common.PoolType) { // amount 类型改为 *big.Int
 	if sellAmount <= 0 { // 避免卖出0或负数数量
-		log.Printf("尝试卖出 %s 的数量 %s 过小或为0，取消卖出", track.Symbol)
+		log.Printf("尝试卖出 %s 的数量 %s 过小或为0，取消卖出", tokenAddress)
 		return
 	}
 	if sellPercent == "100%" {
@@ -236,6 +238,10 @@ func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, SoldPerc
 			log.Printf("取消订阅代币 %s 失败: %v", tokenAddress, err)
 		} else {
 			log.Printf("成功取消订阅代币 %s 的交易事件", tokenAddress)
+			// 调用回调函数通知Bot移除代币
+			if t.onTokenSold != nil {
+				t.onTokenSold(tokenAddress)
+			}
 		}
 		return
 	}

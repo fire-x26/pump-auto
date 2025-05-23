@@ -66,7 +66,7 @@ func TestSellToken(t *testing.T) {
 	}{
 		{
 			name:             "正常卖出测试",
-			mint:             "7kXwmx81UteinNHkCBRfVdZfiwMG8oyak824zUPDpump", // SOL代币地址
+			mint:             "45Xxq2nrxLA2cy4AJKkKyiYqKyKVqcCtdy7j1kNqpump", // SOL代币地址
 			amount:           1,
 			sellPercent:      "100%",
 			denominatedInSol: false,
