@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
 	"pump_auto/internal/ws"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +39,7 @@ func NewBot() *Bot {
 		stopChan:   make(chan struct{}),
 		ctx:        ctx,
 		cancelFunc: cancel,
-		workerPool: make(chan struct{}, 2),    // 修改此处，创建容量为2的工作池
+		workerPool: make(chan struct{}, 1),    // 修改此处，创建容量为2的工作池
 		heldTokens: make(map[string]struct{}), // 初始化持有的代币
 	}
 	b.tradeExecutor = execctor.NewTradeExecutor(b.RemoveHeldToken) // 创建交易执行器并传入回调
@@ -159,9 +161,25 @@ func (b *Bot) RunListener() error {
 }
 
 func fetchMetadata(uri string) (*model.TokenMetadata, error) {
-	// 创建自定义的 HTTP 客户端
+	// 创建一个自定义的Transport，强制使用IPv4
+	defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// 检查原始网络类型是否包含 "tcp"，如果是，则强制为 "tcp4"
+		// 对于其他网络类型 (如 "udp")，则保持原样
+		forcedNetwork := network
+		if strings.Contains(network, "tcp") {
+			forcedNetwork = "tcp4"
+		}
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		return dialer.DialContext(ctx, forcedNetwork, addr)
+	}
+
 	client := &http.Client{
-		Timeout: 30 * time.Second, // 设置30秒超时
+		Timeout:   30 * time.Second, // 设置30秒超时
+		Transport: defaultTransport,
 	}
 
 	// 创建新的请求
@@ -279,7 +297,6 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 				PriorityFee:      0.0005,
 				Pool:             common.PUMP,
 			}
-			time.Sleep(5 * time.Second)
 			_, err := b.buyToken(req.Mint, req.Amount, req.DenominatedInSol, req.Slippage, req.PriorityFee, req.Pool)
 			if err != nil {
 				log.Printf("购买代币 %s 失败,error: %v", tokenAddress, err)
@@ -326,68 +343,6 @@ func (b *Bot) RemoveHeldToken(tokenAddress string) {
 	defer b.mutex.Unlock()
 	delete(b.heldTokens, tokenAddress)
 	log.Printf("代币 %s 已从持有列表移除", tokenAddress)
-}
-
-// 订阅新代币创建事件
-func subscribeToNewTokens(ws *websocket.Conn) error {
-	payload := map[string]interface{}{
-		"method": "subscribeNewToken",
-	}
-
-	return sendSubscription(ws, payload)
-}
-
-// 订阅迁移事件
-func subscribeToMigrations(ws *websocket.Conn) error {
-	payload := map[string]interface{}{
-		"method": "subscribeMigration",
-	}
-
-	return sendSubscription(ws, payload)
-}
-
-// 订阅账户交易事件
-func subscribeToAccountTrades(ws *websocket.Conn, accounts []string) error {
-	payload := map[string]interface{}{
-		"method": "subscribeAccountTrade",
-		"keys":   accounts,
-	}
-
-	return sendSubscription(ws, payload)
-}
-
-// 订阅代币交易事件
-func subscribeToTokenTrades(ws *websocket.Conn, tokens []string) error {
-	payload := map[string]interface{}{
-		"method": "subscribeTokenTrade",
-		"keys":   tokens,
-	}
-
-	return sendSubscription(ws, payload)
-}
-
-func unsubscribeToTokenTrades(ws *websocket.Conn, tokens []string) error {
-	payload := map[string]interface{}{
-		"method": "unsubscribeTokenTrade",
-		"keys":   tokens,
-	}
-
-	return sendSubscription(ws, payload)
-}
-
-// 发送订阅请求
-func sendSubscription(ws *websocket.Conn, payload map[string]interface{}) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("序列化订阅请求失败: %w", err)
-	}
-
-	if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
-		return fmt.Errorf("发送订阅请求失败: %w", err)
-	}
-
-	log.Printf("已发送订阅请求: %s", string(data))
-	return nil
 }
 
 // 关闭Bot并清理资源
