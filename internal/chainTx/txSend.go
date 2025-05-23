@@ -8,91 +8,15 @@ import (
 	"net/http"
 	"net/url"
 	"pump_auto/internal/common"
+	"strconv"
 	"strings"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-//func init() {
-//	// 获取当前工作目录
-//	currentDir, err := os.Getwd()
-//	if err != nil {
-//		log.Printf("警告: 无法获取当前工作目录: %v", err)
-//	} else {
-//		log.Printf("当前工作目录: %s", currentDir)
-//	}
-//
-//	// 尝试从多个位置加载环境变量
-//	envPaths := []string{
-//		".env",                                  // 当前目录
-//		"../.env",                               // 上级目录
-//		filepath.Join("..", ".env"),             // 使用filepath处理路径
-//		filepath.Join(currentDir, ".env"),       // 使用完整路径
-//		filepath.Join(currentDir, "..", ".env"), // 上级目录的完整路径
-//	}
-//
-//	log.Printf("尝试加载环境变量文件，搜索路径:")
-//	for _, path := range envPaths {
-//		log.Printf("  - %s", path)
-//		if _, err := os.Stat(path); err == nil {
-//			log.Printf("找到环境变量文件: %s", path)
-//			// 文件存在，尝试读取
-//			content, err := os.ReadFile(path)
-//			if err != nil {
-//				log.Printf("警告: 无法读取环境变量文件 %s: %v", path, err)
-//				continue
-//			}
-//
-//			log.Printf("成功读取环境变量文件内容:")
-//			lines := strings.Split(string(content), "\n")
-//			for _, line := range lines {
-//				line = strings.TrimSpace(line)
-//				if line == "" || strings.HasPrefix(line, "#") {
-//					continue
-//				}
-//
-//				parts := strings.SplitN(line, "=", 2)
-//				if len(parts) != 2 {
-//					continue
-//				}
-//
-//				key := strings.TrimSpace(parts[0])
-//				value := strings.TrimSpace(parts[1])
-//
-//				// 移除值两端的引号
-//				value = strings.Trim(value, "\"'")
-//
-//				// 打印环境变量（隐藏私钥）
-//				if key == "SOLANA_PRIVATE_KEY" {
-//					log.Printf("  %s=******", key)
-//				} else {
-//					log.Printf("  %s=%s", key, value)
-//				}
-//
-//				// 设置环境变量
-//				os.Setenv(key, value)
-//			}
-//			log.Printf("成功从 %s 加载环境变量", path)
-//			break
-//		} else {
-//			log.Printf("未找到环境变量文件: %s", path)
-//		}
-//	}
-//
-//	// 从环境变量读取配置
-//	PRIVATE_KEY = os.Getenv("SOLANA_PRIVATE_KEY")
-//	if PRIVATE_KEY == "" {
-//		log.Fatal("环境变量 SOLANA_PRIVATE_KEY 未设置")
-//	}
-//
-//	RPC_URL = os.Getenv("SOLANA_RPC_URL")
-//	if RPC_URL == "" {
-//		log.Fatal("环境变量 SOLANA_RPC_URL 未设置")
-//	}
-//
-//	log.Printf("成功加载环境变量: RPC_URL=%s", RPC_URL)
-//}
+const PUBLIC_KEY = "5zUyGNwtCCyYthLqUzYEDhYhfRrK9eHNf4DQ4KhQEirm"
 
 // params
 type TradeRequest struct {
@@ -122,7 +46,13 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 	if err != nil {
 		return "", fmt.Errorf("解析私钥失败: %v", err)
 	}
-	publicKey := privateKey.PublicKey()
+
+	// 使用已定义的公钥
+	publicKey, err := solana.PublicKeyFromBase58(PUBLIC_KEY)
+	if err != nil {
+		return "", fmt.Errorf("解析公钥失败: %v", err)
+	}
+
 	var request interface{}
 	if sellPercent != "" && denominatedInSol == false {
 		request = &TradeRequestPercent{
@@ -209,53 +139,6 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 		log.Printf("- 账户 %d: %s", i, acc.String())
 	}
 
-	// // 检查并修复程序ID
-	// for i, inst := range tx.Message.Instructions {
-	// 	log.Printf("处理指令 %d 的程序ID", i)
-	// 	currentProgramID := tx.Message.AccountKeys[inst.ProgramIDIndex].String()
-	// 	log.Printf("当前程序ID: %s", currentProgramID)
-
-	// 	// 如果是AToken程序，需要替换为Token程序
-	// 	if currentProgramID == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" {
-	// 		// 找到Token程序的索引
-	// 		for j, acc := range tx.Message.AccountKeys {
-	// 			if acc.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
-	// 				inst.ProgramIDIndex = uint16(j)
-	// 				log.Printf("修复指令 %d 的程序ID索引从 %d 改为 %d", i, inst.ProgramIDIndex, j)
-	// 				break
-	// 			}
-	// 		}
-	// 	}
-
-	// 	// 检查指令的账户列表
-	// 	for j, accIndex := range inst.Accounts {
-	// 		acc := tx.Message.AccountKeys[accIndex].String()
-	// 		log.Printf("指令 %d 的账户 %d: %s", i, j, acc)
-
-	// 		// 如果账户是AToken程序，也需要替换为Token程序
-	// 		if acc == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" {
-	// 			for k, accKey := range tx.Message.AccountKeys {
-	// 				if accKey.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
-	// 					inst.Accounts[j] = uint16(k)
-	// 					log.Printf("修复指令 %d 的账户索引 %d 从 %d 改为 %d", i, j, accIndex, k)
-	// 					break
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-	// }
-
-	// for i, inst := range tx.Message.Instructions {
-	// 	log.Printf("指令 %d 详情:", i)
-	// 	log.Printf("- 程序ID索引: %d (程序ID: %s)", inst.ProgramIDIndex, tx.Message.AccountKeys[inst.ProgramIDIndex].String())
-	// 	log.Printf("- 账户数量: %d", len(inst.Accounts))
-	// 	log.Printf("- 数据长度: %d", len(inst.Data))
-	// 	log.Printf("- 账户列表:")
-	// 	for j, accIndex := range inst.Accounts {
-	// 		log.Printf("  - 账户索引 %d: %d (账户: %s)", j, accIndex, tx.Message.AccountKeys[accIndex].String())
-	// 	}
-	// }
-
 	// 获取最新区块哈希
 	client := rpc.New(RPC_URL)
 	recent, err := client.GetLatestBlockhash(context.Background(), rpc.CommitmentFinalized)
@@ -295,4 +178,88 @@ func BuyToken(mint string, amount float64, denominatedInSol bool, slippage int, 
 }
 func SellToken(mint string, amount float64, sellPercent string, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	return ExecuteTrade(common.SELL, mint, amount, sellPercent, false, slippage, priorityFee, pool)
+}
+
+// GetTokenDecimal 获取代币的精度
+func GetTokenDecimal(mint string) (uint8, error) {
+	client := rpc.New(RPC_URL)
+
+	// 将mint地址转换为PublicKey
+	mintPubkey, err := solana.PublicKeyFromBase58(mint)
+	if err != nil {
+		return 0, fmt.Errorf("无效的代币地址: %v", err)
+	}
+
+	// 使用 GetAccountDataInto 直接获取代币信息
+	var mintInfo token.Mint
+	err = client.GetAccountDataInto(
+		context.Background(),
+		mintPubkey,
+		&mintInfo,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("获取代币信息失败: %v", err)
+	}
+
+	// 打印代币信息用于调试
+	log.Printf("代币信息: 精度=%d, 供应量=%d", mintInfo.Decimals, mintInfo.Supply)
+
+	return mintInfo.Decimals, nil
+}
+
+// GetTokenBalance 获取用户对特定代币的余额
+func GetTokenBalance(mint string) (float64, error) {
+	client := rpc.New(RPC_URL)
+
+	// 使用已定义的公钥
+	publicKey, err := solana.PublicKeyFromBase58(PUBLIC_KEY)
+	if err != nil {
+		return 0, fmt.Errorf("解析公钥失败: %v", err)
+	}
+
+	// 将mint地址转换为PublicKey
+	mintPubkey, err := solana.PublicKeyFromBase58(mint)
+	if err != nil {
+		return 0, fmt.Errorf("无效的代币地址: %v", err)
+	}
+
+	// 获取用户的代币账户
+	tokenAccounts, err := client.GetTokenAccountsByOwner(
+		context.Background(),
+		publicKey,
+		&rpc.GetTokenAccountsConfig{
+			Mint: &mintPubkey,
+		},
+		&rpc.GetTokenAccountsOpts{
+			Encoding: solana.EncodingBase64,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("获取代币账户失败: %v", err)
+	}
+
+	if len(tokenAccounts.Value) == 0 {
+		log.Printf("用户没有代币 %s 的账户", mint)
+		return 0, nil // 用户没有该代币的账户
+	}
+
+	tokenVault := solana.MustPublicKeyFromBase58(tokenAccounts.Value[0].Pubkey.String())
+	// 获取代币账户余额
+	balance, err := client.GetTokenAccountBalance(
+		context.Background(),
+		tokenVault,
+		rpc.CommitmentFinalized,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("获取代币余额失败: %v", err)
+	}
+
+	// 将余额字符串转换为 float64
+	result, err := strconv.ParseFloat(balance.Value.Amount, 64)
+	if err != nil {
+		return 0, fmt.Errorf("转换余额失败: %v", err)
+	}
+
+	log.Printf("代币 %s 余额: %f", mint, result)
+	return result, nil
 }

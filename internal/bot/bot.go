@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"pump_auto/internal/chainTx"
 	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
@@ -132,11 +133,21 @@ func (b *Bot) RunListener() error {
 				}
 
 				// 格式化打印消息
-				formattedMsg := model.FormatTokenEvent(message)
-				log.Println(formattedMsg)
 
 				// 检查是否是新代币创建事件(txType=create)
 				if tokenEvent.TxType == "create" {
+					formattedMsg := model.FormatTokenEvent(message)
+					log.Println(formattedMsg)
+					// 检查当前持有的代币数量
+					b.mutex.Lock()
+					heldTokensCount := len(b.heldTokens)
+					b.mutex.Unlock()
+
+					if heldTokensCount >= 2 {
+						log.Printf("当前已持有 %d 个代币，暂停处理新代币创建事件", heldTokensCount)
+						continue
+					}
+
 					// 将tokenEvent转换为map，以便与现有代码兼容
 					tokenData := map[string]interface{}{
 						"params": map[string]interface{}{
@@ -260,12 +271,14 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 			req := &common.TradeReq{
 				Action:           "buy",
 				Mint:             tokenAddress,
-				Amount:           0.001,
+				Amount:           0.001, // This is SOL amount
 				DenominatedInSol: true,
 				Slippage:         10,
 				PriorityFee:      0.0005,
 				Pool:             common.PUMP,
 			}
+
+			// metadata.Symbol 应该存在于 model.TokenMetadata 中
 			_, err := b.buyToken(req.Mint, req.Amount, req.DenominatedInSol, req.Slippage, req.PriorityFee, req.Pool)
 			if err != nil {
 				log.Printf("购买代币 %s 失败,error: %v", tokenAddress, err)
@@ -295,13 +308,28 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 	// }
 	// 假设购买成功，将代币添加到持有列表
 	// 在实际的购买逻辑成功后再执行此操作
+	// wsConn := ws.GetGlobalWS() // This line was removed in a previous step, ensure it's not needed or handled by ws.SubscribeToTokenTrades
+	// if wsConn == nil {
+	// return "", fmt.Errorf("WebSocket连接未建立，无法购买代币 %s", mint)
+	// }
 
-	err := ws.SubscribeToTokenTrades([]string{mint})
+	outAmount, err := chainTx.GetTokenBalance(mint)
+	if err != nil {
+		log.Printf("获取代币 %s 余额失败: %v", mint, err)
+		return "", fmt.Errorf("获取代币余额失败: %v", err)
+	}
+	log.Printf("购买后代币 %s 余额: %f", mint, outAmount)
+
+	err = ws.SubscribeToTokenTrades([]string{mint})
 	if err == nil {
 		b.mutex.Lock()
 		b.heldTokens[mint] = struct{}{}
 		b.mutex.Unlock()
 		log.Printf("成功购买代币 %s 并添加到持有列表", mint)
+
+		// 'amount' is the SOL amount intended to be spent
+		b.tradeExecutor.ExpectBuyForToken(mint, amount, outAmount)
+
 	}
 	return "", err
 }
