@@ -161,39 +161,8 @@ func (b *Bot) RunListener() error {
 }
 
 func fetchMetadata(uri string) (*model.TokenMetadata, error) {
-	// 创建一个自定义的Transport，强制使用IPv4
-	defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
-	defaultTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 检查原始网络类型是否包含 "tcp"，如果是，则强制为 "tcp4"
-		// 对于其他网络类型 (如 "udp")，则保持原样
-		forcedNetwork := network
-		if strings.Contains(network, "tcp") {
-			forcedNetwork = "tcp4"
-		}
-		dialer := &net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}
-		return dialer.DialContext(ctx, forcedNetwork, addr)
-	}
-
-	client := &http.Client{
-		Timeout:   30 * time.Second, // 设置30秒超时
-		Transport: defaultTransport,
-	}
-
-	// 创建新的请求
-	req, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		log.Printf("创建HTTP请求失败: %v", err)
-		return nil, err
-	}
-
-	// 设置 User-Agent，模拟浏览器行为
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
 	// 发起HTTP请求获取元数据
-	resp, err := client.Do(req)
+	resp, err := http.Get(uri)
 	if err != nil {
 		log.Printf("HTTP请求失败: %v", err)
 		return nil, err
