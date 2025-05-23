@@ -168,10 +168,6 @@ func (t *TradeExecutor) checkAndExecuteStrategies(tokenAddress string) {
 	track.mutex.Lock()
 	defer track.mutex.Unlock()
 
-	if track.Status != StatusBought {
-		return // 不是已买入状态（可能正在卖出或已卖出）
-	}
-
 	if track.RemainingCoin <= 0 {
 		return
 	}
@@ -306,7 +302,7 @@ func (t *TradeExecutor) ProcessTradeMessage(message []byte) {
 		log.Printf("TradeExecutor: 解析WebSocket交易消息失败: %v, 原始消息: %s", err, string(message))
 		return
 	}
-
+	log.Println("接收到交易消息:", tradeRecord)
 	t.mutex.RLock() // Use RLock for checking existence first
 	track, exists := t.priceTracks[tradeRecord.Mint]
 	t.mutex.RUnlock()

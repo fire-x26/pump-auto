@@ -101,3 +101,89 @@ func TestSellToken(t *testing.T) {
 		})
 	}
 }
+
+func TestGetTokenBalance(t *testing.T) {
+	tests := []struct {
+		name    string
+		mint    string
+		want    float64
+		wantErr bool
+	}{
+		{
+			name:    "正常代币余额查询",
+			mint:    "9BVFGcsfTkf27ZbHEuGoGanfacy7ntWZNW25xhcHpump", // 使用测试用例中的代币地址
+			want:    0,                                              // 由于余额会变化，我们只检查是否能成功获取
+			wantErr: false,
+		},
+		{
+			name:    "无效代币地址",
+			mint:    "invalid_mint_address",
+			want:    0,
+			wantErr: true,
+		},
+		{
+			name:    "不存在的代币",
+			mint:    "11111111111111111111111111111111",
+			want:    0,
+			wantErr: false, // 不存在的代币应该返回0而不是错误
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetTokenBalance(tt.mint)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetTokenBalance() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got < 0 {
+				t.Error("GetTokenBalance() 返回的余额不能为负数")
+			}
+			// 打印余额信息用于调试
+			t.Logf("代币 %s 的余额为: %f", tt.mint, got)
+		})
+	}
+}
+
+func TestGetTokenDecimal(t *testing.T) {
+	tests := []struct {
+		name    string
+		mint    string
+		want    uint8
+		wantErr bool
+	}{
+		{
+			name:    "正常代币精度查询",
+			mint:    "9BVFGcsfTkf27ZbHEuGoGanfacy7ntWZNW25xhcHpump", // 使用测试用例中的代币地址
+			want:    9,                                              // 大多数代币的精度是9
+			wantErr: false,
+		},
+		{
+			name:    "无效代币地址",
+			mint:    "invalid_mint_address",
+			want:    0,
+			wantErr: true,
+		},
+		{
+			name:    "不存在的代币",
+			mint:    "11111111111111111111111111111111",
+			want:    0,
+			wantErr: true, // 不存在的代币应该返回错误
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetTokenDecimal(tt.mint)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetTokenDecimal() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("GetTokenDecimal() = %v, want %v", got, tt.want)
+			}
+			// 打印精度信息用于调试
+			t.Logf("代币 %s 的精度为: %d", tt.mint, got)
+		})
+	}
+}

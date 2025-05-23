@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"pump_auto/internal/chainTx"
 	"pump_auto/internal/common"
 	"pump_auto/internal/execctor"
 	"pump_auto/internal/model"
 	"pump_auto/internal/ws"
-	"strings"
 	"sync"
 	"time"
 
@@ -132,12 +130,9 @@ func (b *Bot) RunListener() error {
 					b.tradeExecutor.ProcessTradeMessage(message)
 				}
 
-				// 格式化打印消息
-
 				// 检查是否是新代币创建事件(txType=create)
 				if tokenEvent.TxType == "create" {
-					formattedMsg := model.FormatTokenEvent(message)
-					log.Println(formattedMsg)
+
 					// 检查当前持有的代币数量
 					b.mutex.Lock()
 					heldTokensCount := len(b.heldTokens)
@@ -147,7 +142,8 @@ func (b *Bot) RunListener() error {
 						log.Printf("当前已持有 %d 个代币，暂停处理新代币创建事件", heldTokensCount)
 						continue
 					}
-
+					formattedMsg := model.FormatTokenEvent(message)
+					log.Println(formattedMsg)
 					// 将tokenEvent转换为map，以便与现有代码兼容
 					tokenData := map[string]interface{}{
 						"params": map[string]interface{}{
@@ -312,7 +308,7 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 	// if wsConn == nil {
 	// return "", fmt.Errorf("WebSocket连接未建立，无法购买代币 %s", mint)
 	// }
-
+	b.heldTokens[mint] = struct{}{}
 	outAmount, err := chainTx.GetTokenBalance(mint)
 	if err != nil {
 		log.Printf("获取代币 %s 余额失败: %v", mint, err)
