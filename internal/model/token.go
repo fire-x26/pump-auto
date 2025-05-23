@@ -8,6 +8,6 @@ type TokenMetadata struct {
 	Image       string `json:"image"`
 	ShowName    bool   `json:"showName"`
 	CreatedOn   string `json:"createdOn"`
-	Twitter     string `json:"twitter"` // Twitter链接字段
-	Website     string `json:"website"` // 网站链接字段
+	Twitter     string `json:"twitter,omitempty"` // Twitter链接字段，可选
+	Website     string `json:"website,omitempty"` // 网站链接字段，可选
 }

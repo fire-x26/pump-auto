@@ -14,9 +14,6 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-const PRIVATE_KEY = ""
-const RPC_URL = ""
-
 //func init() {
 //	// 获取当前工作目录
 //	currentDir, err := os.Getwd()
@@ -108,6 +105,16 @@ type TradeRequest struct {
 	PriorityFee      float64            `json:"priorityFee"`
 	Pool             common.PoolType    `json:"pool"`
 }
+type TradeRequestPercent struct {
+	PublicKey        string             `json:"publicKey"`
+	Action           common.TradeAction `json:"action"`
+	Mint             string             `json:"mint"`
+	Amount           string             `json:"amount"`
+	DenominatedInSol string             `json:"denominatedInSol"`
+	Slippage         int                `json:"slippage"`
+	PriorityFee      float64            `json:"priorityFee"`
+	Pool             common.PoolType    `json:"pool"`
+}
 
 func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPercent string, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	// 解析私钥（只解析一次）
@@ -116,13 +123,13 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 		return "", fmt.Errorf("解析私钥失败: %v", err)
 	}
 	publicKey := privateKey.PublicKey()
-	var request *TradeRequest
+	var request interface{}
 	if sellPercent != "" && denominatedInSol == false {
-		request = &TradeRequest{
+		request = &TradeRequestPercent{
 			PublicKey:        publicKey.String(),
 			Action:           action,
 			Mint:             mint,
-			Amount:           amount,
+			Amount:           sellPercent,
 			DenominatedInSol: fmt.Sprintf("%t", denominatedInSol),
 			Slippage:         slippage,
 			PriorityFee:      priorityFee,
@@ -143,25 +150,26 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 
 	// 准备交易请求
 	data := url.Values{}
-	data.Set("publicKey", request.PublicKey)
-	data.Set("action", string(request.Action))
-	data.Set("mint", request.Mint)
-	data.Set("amount", fmt.Sprintf("%f", request.Amount))
-	data.Set("denominatedInSol", request.DenominatedInSol)
-	data.Set("slippage", fmt.Sprintf("%d", request.Slippage))
-	data.Set("priorityFee", fmt.Sprintf("%f", request.PriorityFee))
-	data.Set("pool", string(request.Pool))
-
-	// 添加请求详情日志
-	log.Printf("交易请求详情:")
-	log.Printf("- 公钥: %s", request.PublicKey)
-	log.Printf("- 动作: %s", request.Action)
-	log.Printf("- 代币地址: %s", request.Mint)
-	log.Printf("- 数量: %f", request.Amount)
-	log.Printf("- 是否以SOL计价: %s", request.DenominatedInSol)
-	log.Printf("- 滑点: %d", request.Slippage)
-	log.Printf("- 优先费用: %f", request.PriorityFee)
-	log.Printf("- 池类型: %s", request.Pool)
+	switch r := request.(type) {
+	case *TradeRequest:
+		data.Set("publicKey", r.PublicKey)
+		data.Set("action", string(r.Action))
+		data.Set("mint", r.Mint)
+		data.Set("amount", fmt.Sprintf("%f", r.Amount))
+		data.Set("denominatedInSol", r.DenominatedInSol)
+		data.Set("slippage", fmt.Sprintf("%d", r.Slippage))
+		data.Set("priorityFee", fmt.Sprintf("%f", r.PriorityFee))
+		data.Set("pool", string(r.Pool))
+	case *TradeRequestPercent:
+		data.Set("publicKey", r.PublicKey)
+		data.Set("action", string(r.Action))
+		data.Set("mint", r.Mint)
+		data.Set("amount", r.Amount)
+		data.Set("denominatedInSol", r.DenominatedInSol)
+		data.Set("slippage", fmt.Sprintf("%d", r.Slippage))
+		data.Set("priorityFee", fmt.Sprintf("%f", r.PriorityFee))
+		data.Set("pool", string(r.Pool))
+	}
 
 	resp, err := http.Post(
 		"https://pumpportal.fun/api/trade-local",
@@ -194,38 +202,59 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 	log.Printf("交易详情:")
 	log.Printf("- 交易指令数量: %d", len(tx.Message.Instructions))
 	log.Printf("- 交易账户数量: %d", len(tx.Message.AccountKeys))
-	
+
 	// 首先打印所有账户
 	log.Printf("交易账户列表:")
 	for i, acc := range tx.Message.AccountKeys {
 		log.Printf("- 账户 %d: %s", i, acc.String())
 	}
-	
-	// 检查并修复程序ID
-	for i, inst := range tx.Message.Instructions {
-		// 如果是第2个指令，并且程序ID是AToken程序，则修改为Token程序
-		if i == 2 && tx.Message.AccountKeys[inst.ProgramIDIndex].String() == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" {
-			// 找到Token程序的索引
-			for j, acc := range tx.Message.AccountKeys {
-				if acc.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
-					inst.ProgramIDIndex = uint16(j)
-					log.Printf("修复指令 %d 的程序ID索引为 %d", i, j)
-					break
-				}
-			}
-		}
-	}
 
-	for i, inst := range tx.Message.Instructions {
-		log.Printf("指令 %d 详情:", i)
-		log.Printf("- 程序ID索引: %d (程序ID: %s)", inst.ProgramIDIndex, tx.Message.AccountKeys[inst.ProgramIDIndex].String())
-		log.Printf("- 账户数量: %d", len(inst.Accounts))
-		log.Printf("- 数据长度: %d", len(inst.Data))
-		log.Printf("- 账户列表:")
-		for j, accIndex := range inst.Accounts {
-			log.Printf("  - 账户索引 %d: %d (账户: %s)", j, accIndex, tx.Message.AccountKeys[accIndex].String())
-		}
-	}
+	// // 检查并修复程序ID
+	// for i, inst := range tx.Message.Instructions {
+	// 	log.Printf("处理指令 %d 的程序ID", i)
+	// 	currentProgramID := tx.Message.AccountKeys[inst.ProgramIDIndex].String()
+	// 	log.Printf("当前程序ID: %s", currentProgramID)
+
+	// 	// 如果是AToken程序，需要替换为Token程序
+	// 	if currentProgramID == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" {
+	// 		// 找到Token程序的索引
+	// 		for j, acc := range tx.Message.AccountKeys {
+	// 			if acc.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+	// 				inst.ProgramIDIndex = uint16(j)
+	// 				log.Printf("修复指令 %d 的程序ID索引从 %d 改为 %d", i, inst.ProgramIDIndex, j)
+	// 				break
+	// 			}
+	// 		}
+	// 	}
+
+	// 	// 检查指令的账户列表
+	// 	for j, accIndex := range inst.Accounts {
+	// 		acc := tx.Message.AccountKeys[accIndex].String()
+	// 		log.Printf("指令 %d 的账户 %d: %s", i, j, acc)
+
+	// 		// 如果账户是AToken程序，也需要替换为Token程序
+	// 		if acc == "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" {
+	// 			for k, accKey := range tx.Message.AccountKeys {
+	// 				if accKey.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+	// 					inst.Accounts[j] = uint16(k)
+	// 					log.Printf("修复指令 %d 的账户索引 %d 从 %d 改为 %d", i, j, accIndex, k)
+	// 					break
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+	// for i, inst := range tx.Message.Instructions {
+	// 	log.Printf("指令 %d 详情:", i)
+	// 	log.Printf("- 程序ID索引: %d (程序ID: %s)", inst.ProgramIDIndex, tx.Message.AccountKeys[inst.ProgramIDIndex].String())
+	// 	log.Printf("- 账户数量: %d", len(inst.Accounts))
+	// 	log.Printf("- 数据长度: %d", len(inst.Data))
+	// 	log.Printf("- 账户列表:")
+	// 	for j, accIndex := range inst.Accounts {
+	// 		log.Printf("  - 账户索引 %d: %d (账户: %s)", j, accIndex, tx.Message.AccountKeys[accIndex].String())
+	// 	}
+	// }
 
 	// 获取最新区块哈希
 	client := rpc.New(RPC_URL)

@@ -68,9 +68,9 @@ func TestSellToken(t *testing.T) {
 			name:             "正常卖出测试",
 			mint:             "7kXwmx81UteinNHkCBRfVdZfiwMG8oyak824zUPDpump", // SOL代币地址
 			amount:           1,
-			sellPercent:      "100",
+			sellPercent:      "100%",
 			denominatedInSol: false,
-			slippage:         1,
+			slippage:         10,
 			priorityFee:      0.000005,
 			pool:             common.PUMP,
 			wantErr:          false,
