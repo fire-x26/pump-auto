@@ -17,3 +17,6 @@ const (
 	RAYDIUM_CPMM PoolType = "raydium-cpmm"
 	BONK         PoolType = "bonk"
 )
+
+const MAX_HOLD_TOKEN = 5
+const PRECISION = 16

@@ -68,7 +68,7 @@ func TestSellToken(t *testing.T) {
 	}{
 		{
 			name:             "正常卖出测试",
-			mint:             "CRRH9C72fmpZfPMQ2fSA8Z2AGC4VkFfxUrTCRDuipump", // SOL代币地址
+			mint:             "2kicCkhMhte7k2eqGgWkfPhCbV1EnSnYktxq8HtGpump", // SOL代币地址
 			amount:           1,
 			sellPercent:      "100%",
 			denominatedInSol: false,
@@ -113,7 +113,7 @@ func TestGetTokenBalance(t *testing.T) {
 	}{
 		{
 			name:    "正常代币余额查询",
-			mint:    "9BVFGcsfTkf27ZbHEuGoGanfacy7ntWZNW25xhcHpump", // 使用测试用例中的代币地址
+			mint:    "J6ZevyEKWf6NS9LsJNNmKVyKn3fv7sZmuGGBtQJWpump", // 使用测试用例中的代币地址
 			want:    0,                                              // 由于余额会变化，我们只检查是否能成功获取
 			wantErr: false,
 		},

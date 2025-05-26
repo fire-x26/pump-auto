@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"pump_auto/internal/common"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	bin "github.com/gagliardetto/binary"
@@ -19,6 +21,7 @@ import (
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
 )
+
 
 const PUBLIC_KEY = "5zUyGNwtCCyYthLqUzYEDhYhfRrK9eHNf4DQ4KhQEirm"
 
@@ -58,7 +61,7 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 	}
 
 	var request interface{}
-	if sellPercent != "" && denominatedInSol == false {
+	if sellPercent == "100%" && denominatedInSol == false {
 		request = &TradeRequestPercent{
 			PublicKey:        publicKey.String(),
 			Action:           action,
@@ -103,6 +106,18 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 		data.Set("slippage", fmt.Sprintf("%d", r.Slippage))
 		data.Set("priorityFee", fmt.Sprintf("%f", r.PriorityFee))
 		data.Set("pool", string(r.Pool))
+	}
+
+	// 打印请求数据
+	log.Printf("发送交易请求数据:")
+	log.Printf("--------------------------------")
+
+	log.Printf("URL: https://pumpportal.fun/api/trade-local")
+	log.Printf("--------------------------------")
+
+	log.Printf("请求参数:")
+	for key, values := range data {
+		log.Printf("%s: %v", key, values)
 	}
 
 	resp, err := http.Post(
@@ -178,10 +193,48 @@ func ExecuteTrade(action common.TradeAction, mint string, amount float64, sellPe
 
 func BuyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	fmt.Printf("mint:%s,amout:%f,pool:%s", mint, amount, pool)
-	return ExecuteTrade(common.BUY, mint, amount, "", true, slippage, priorityFee, pool)
+
+	// 设置轮询参数
+	maxRetries := 15 // 最多重试15次
+	retryInterval := 2 * time.Second
+
+	var sign string
+	var err error
+
+	// 开始重试循环
+	for i := 0; i < maxRetries; i++ {
+		sign, err = ExecuteTrade(common.BUY, mint, amount, "", true, slippage, priorityFee, pool)
+		if err == nil {
+			return sign, nil // 如果成功，直接返回
+		}
+
+		log.Printf("第 %d 次购买代币 %s 失败: %v，等待2秒后重试...", i+1, mint, err)
+		time.Sleep(retryInterval)
+	}
+
+	return "", fmt.Errorf("购买代币 %s 失败，已达到最大重试次数: %v", mint, err)
 }
+
 func SellToken(mint string, amount float64, sellPercent string, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
-	return ExecuteTrade(common.SELL, mint, amount, sellPercent, false, slippage, priorityFee, pool)
+	// 设置轮询参数
+	maxRetries := 15 // 最多重试15次
+	retryInterval := 2 * time.Second
+
+	var sign string
+	var err error
+
+	// 开始重试循环
+	for i := 0; i < maxRetries; i++ {
+		sign, err = ExecuteTrade(common.SELL, mint, amount, sellPercent, false, slippage, priorityFee, pool)
+		if err == nil {
+			return sign, nil // 如果成功，直接返回
+		}
+
+		log.Printf("第 %d 次出售代币 %s 失败: %v，等待2秒后重试...", i+1, mint, err)
+		time.Sleep(retryInterval)
+	}
+
+	return "", fmt.Errorf("出售代币 %s 失败，已达到最大重试次数: %v", mint, err)
 }
 
 // GetTokenDecimal 获取代币的精度
@@ -227,61 +280,95 @@ func GetTokenBalance(mint string) (float64, error) {
 		return 0, fmt.Errorf("无效的代币地址: %v", err)
 	}
 
-	// 获取用户的代币账户
-	tokenAccounts, err := client.GetTokenAccountsByOwner(
-		context.Background(),
-		publicKey,
-		&rpc.GetTokenAccountsConfig{
-			Mint: &mintPubkey,
-		},
-		&rpc.GetTokenAccountsOpts{
-			Encoding: solana.EncodingBase64,
-		},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("获取代币账户失败: %v", err)
+	// 设置轮询参数
+	maxRetries := 15 // 最多等待30秒
+	retryInterval := 1 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		// 获取用户的代币账户
+		tokenAccounts, err := client.GetTokenAccountsByOwner(
+			context.Background(),
+			publicKey,
+			&rpc.GetTokenAccountsConfig{
+				Mint: &mintPubkey,
+			},
+			&rpc.GetTokenAccountsOpts{
+				Encoding: solana.EncodingBase64,
+			},
+		)
+		if err != nil {
+			log.Printf("第 %d 次获取代币账户失败: %v，等待1秒后重试...", i+1, err)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		if len(tokenAccounts.Value) == 0 {
+			log.Printf("第 %d 次检查：用户没有代币 %s 的账户，等待1秒后重试...", i+1, mint)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		tokenVault := solana.MustPublicKeyFromBase58(tokenAccounts.Value[0].Pubkey.String())
+		// 获取代币账户余额
+		balance, err := client.GetTokenAccountBalance(
+			context.Background(),
+			tokenVault,
+			rpc.CommitmentFinalized,
+		)
+		if err != nil {
+			log.Printf("第 %d 次获取代币余额失败: %v，等待1秒后重试...", i+1, err)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		// 将余额字符串转换为 float64
+		result, err := strconv.ParseFloat(balance.Value.Amount, 64)
+		if err != nil {
+			log.Printf("第 %d 次转换余额失败: %v，等待1秒后重试...", i+1, err)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		// 除以代币的decimal（6）
+		result = result / math.Pow10(6)
+
+		log.Printf("代币 %s 余额: %f", mint, result)
+		return result, nil
 	}
 
-	if len(tokenAccounts.Value) == 0 {
-		log.Printf("用户没有代币 %s 的账户", mint)
-		return 0, nil // 用户没有该代币的账户
-	}
-
-	tokenVault := solana.MustPublicKeyFromBase58(tokenAccounts.Value[0].Pubkey.String())
-	// 获取代币账户余额
-	balance, err := client.GetTokenAccountBalance(
-		context.Background(),
-		tokenVault,
-		rpc.CommitmentFinalized,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("获取代币余额失败: %v", err)
-	}
-
-	// 将余额字符串转换为 float64
-	result, err := strconv.ParseFloat(balance.Value.Amount, 64)
-	if err != nil {
-		return 0, fmt.Errorf("转换余额失败: %v", err)
-	}
-
-	log.Printf("代币 %s 余额: %f", mint, result)
-	return result, nil
+	return 0, fmt.Errorf("获取代币 %s 余额超时，已重试 %d 次", mint, maxRetries)
 }
 func ParseTxSign(txSig solana.Signature) (float64, error) {
 	client := rpc.New(RPC_URL)
 	var maxVersion uint64 = 0
 
-	// 使用Base64编码获取交易数据
-	out, err := client.GetTransaction(
-		context.Background(),
-		txSig,
-		&rpc.GetTransactionOpts{
-			Encoding:                       solana.EncodingBase64,
-			MaxSupportedTransactionVersion: &maxVersion,
-		},
-	)
+	// 设置轮询参数
+	maxRetries := 20 // 60秒 / 3秒 = 20次
+	retryInterval := 3 * time.Second
+
+	var out *rpc.GetTransactionResult
+	var err error
+
+	// 开始轮询查询
+	for i := 0; i < maxRetries; i++ {
+		out, err = client.GetTransaction(
+			context.Background(),
+			txSig,
+			&rpc.GetTransactionOpts{
+				Encoding:                       solana.EncodingBase64,
+				MaxSupportedTransactionVersion: &maxVersion,
+			},
+		)
+		if err == nil {
+			break // 如果查询成功，跳出循环
+		}
+
+		fmt.Printf("第 %d 次查询交易失败: %v，等待3秒后重试...\n", i+1, err)
+		time.Sleep(retryInterval)
+	}
+
 	if err != nil {
-		fmt.Printf("查询交易失败: %v\n", err)
+		fmt.Printf("查询交易失败，已达到最大重试次数: %v\n", err)
 		return 0, err
 	}
 

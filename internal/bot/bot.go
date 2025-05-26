@@ -155,7 +155,7 @@ func (b *Bot) RunListener() error {
 					heldTokensCount := len(b.heldTokens)
 					b.mutex.Unlock()
 
-					if heldTokensCount >= 2 {
+					if heldTokensCount >= common.MAX_HOLD_TOKEN {
 						log.Printf("当前已持有 %d 个代币，暂停处理新代币创建事件", heldTokensCount)
 						continue
 					}
@@ -307,16 +307,22 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 
 func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	b.mutex.Lock()
-	if len(b.heldTokens) >= 2 {
+	if len(b.heldTokens) >= common.MAX_HOLD_TOKEN {
 		b.mutex.Unlock()
-		log.Printf("已持有最大数量的代币 (2)，无法购买新的代币 %s", mint)
+		log.Printf("已持有最大数量的代币 ()，无法购买新的代币 %s", mint)
 		return "", fmt.Errorf("已持有最大数量的代币 (2)，无法购买新的代币 %s", mint)
 	}
 	b.mutex.Unlock()
+	time.Sleep(10 * time.Second)
 
-	sign, err := chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+	var sign string
+	var err error
+
+	// 开始重试循环
+	sign, err = chainTx.BuyToken(mint, amount, denominatedInSol, slippage, priorityFee, pool)
+
 	if err != nil {
-		log.Printf("购买代币 %s 失败,error: %v", mint, err)
+		log.Printf("购买代币 %s 失败，已达到最大重试次数: %v", mint, err)
 		return "", err
 	}
 
@@ -331,12 +337,17 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 		log.Printf("获取代币 %s 余额失败: %v", mint, err)
 		return "", fmt.Errorf("获取代币余额失败: %v", err)
 	}
+	TokenBalance, err := chainTx.GetTokenBalance(mint)
+	if err != nil || outAmount != TokenBalance {
+		log.Printf("获取代币 %s 余额失败: %v,执行卖出", mint, err)
+		_, _ = chainTx.SellToken(mint, 1, "100%", false, 20, 0.0005, common.PUMP)
+		return "", fmt.Errorf("获取代币余额失败: %v,中断该代币的执行", err)
+	}
 	log.Printf("购买后代币 %s 余额: %f", mint, outAmount)
 
 	err = ws.SubscribeToTokenTrades([]string{mint})
 	if err == nil {
 		b.mutex.Lock()
-		b.heldTokens[mint] = struct{}{}
 		b.mutex.Unlock()
 		log.Printf("成功购买代币 %s 并添加到持有列表", mint)
 
