@@ -7,7 +7,6 @@ import (
 	"math"
 	"pump_auto/internal/chainTx"
 	"pump_auto/internal/common"
-	"pump_auto/internal/ws"
 	"sync"
 	"time"
 
@@ -308,16 +307,7 @@ func (t *TradeExecutor) executeTokenSellInternal(track *PriceTrackInfo, SoldPerc
 	}
 
 	if sellPercent == "100%" {
-		// 发送取消订阅消息
-		if err := ws.UnsubscribeToTokenTrades([]string{tokenAddress}); err != nil {
-			common.Log.WithError(err).Error("取消订阅代币失败")
-		} else {
-			common.Log.Info("成功取消订阅代币的交易事件")
-			// 调用回调函数通知Bot移除代币
-			if t.onTokenSold != nil {
-				t.onTokenSold(tokenAddress)
-			}
-		}
+		t.onTokenSold(tokenAddress)
 		return
 	}
 

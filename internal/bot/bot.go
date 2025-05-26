@@ -45,7 +45,7 @@ type Bot struct {
 	workerPool    chan struct{}           // 工作池通道，用于限制并发工作线程数
 	workerWg      sync.WaitGroup          // 等待组，用于等待所有工作线程完成
 	tradeExecutor *execctor.TradeExecutor // 交易执行器
-	heldTokens    map[string]struct{}     // 新增字段：用于跟踪持有的代币
+	heldTokens    map[string]chan bool    // 修改为map[string]chan bool，用于存储代币的心跳通道
 }
 
 // 创建新的Bot实例
@@ -55,8 +55,8 @@ func NewBot() *Bot {
 		stopChan:   make(chan struct{}),
 		ctx:        ctx,
 		cancelFunc: cancel,
-		workerPool: make(chan struct{}, 1),    // 修改此处，创建容量为2的工作池
-		heldTokens: make(map[string]struct{}), // 初始化持有的代币
+		workerPool: make(chan struct{}, 1),     // 修改此处，创建容量为2的工作池
+		heldTokens: make(map[string]chan bool), // 初始化持有的代币
 	}
 	b.tradeExecutor = execctor.NewTradeExecutor(b.RemoveHeldToken) // 创建交易执行器并传入回调
 	return b
@@ -144,7 +144,19 @@ func (b *Bot) RunListener() error {
 
 				// 如果是交易记录消息(buy或sell)，则转发给交易执行器更新价格
 				if tokenEvent.TxType == "buy" || tokenEvent.TxType == "sell" {
-					b.tradeExecutor.ProcessTradeMessage(message)
+					go func(msg []byte) {
+						b.tradeExecutor.ProcessTradeMessage(msg)
+					}(message)
+
+					// 检查是否是持有的代币的交易消息
+					if ch := b.getTokenChannel(tokenEvent.Mint); ch != nil {
+						select {
+						case ch <- true:
+							// 成功发送心跳
+						case <-b.ctx.Done():
+							// 上下文已取消，忽略
+						}
+					}
 				}
 
 				// 检查是否是新代币创建事件(txType=create)
@@ -305,6 +317,39 @@ func (b *Bot) processNewToken(data map[string]interface{}) {
 	log.Printf("工作线程完成处理代币: %s", tokenAddress)
 }
 
+// 添加新的辅助方法
+func (b *Bot) getTokenChannel(mint string) chan bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.heldTokens[mint]
+}
+
+func (b *Bot) waitForTradeAndSellIfTimeout(mint string) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.getTokenChannel(mint):
+			// 收到交易消息，重置计时器
+			ticker.Reset(30 * time.Second)
+		case <-ticker.C:
+			// 每30秒检查一次
+			log.Printf("代币 %s 在30秒内没有收到交易消息，执行卖出", mint)
+			_, err := chainTx.SellToken(mint, 1, "100%", false, 20, 0.0005, common.PUMP)
+			if err != nil {
+				log.Printf("卖出代币 %s 失败: %v", mint, err)
+			}
+			b.RemoveHeldToken(mint)
+			return
+		case <-b.ctx.Done():
+			b.RemoveHeldToken(mint)
+			return
+		}
+	}
+}
+
+// 修改buyToken方法
 func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slippage int, priorityFee float64, pool common.PoolType) (string, error) {
 	b.mutex.Lock()
 	if len(b.heldTokens) >= common.MAX_HOLD_TOKEN {
@@ -330,7 +375,12 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 	if wsConn == nil {
 		return "", fmt.Errorf("WebSocket连接未建立，无法购买代币 %s", mint)
 	}
-	b.heldTokens[mint] = struct{}{}
+
+	// 创建心跳通道并存储
+	b.mutex.Lock()
+	b.heldTokens[mint] = make(chan bool, 1)
+	b.mutex.Unlock()
+
 	txSig := solana.MustSignatureFromBase58(sign)
 	outAmount, err := chainTx.ParseTxSign(txSig)
 	if err != nil {
@@ -353,6 +403,9 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 
 		// 'amount' is the SOL amount intended to be spent
 		b.tradeExecutor.ExpectBuyForToken(mint, amount, outAmount)
+
+		// 启动超时检查
+		go b.waitForTradeAndSellIfTimeout(mint)
 	}
 	return sign, err
 }
@@ -361,8 +414,18 @@ func (b *Bot) buyToken(mint string, amount float64, denominatedInSol bool, slipp
 func (b *Bot) RemoveHeldToken(tokenAddress string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	delete(b.heldTokens, tokenAddress)
-	log.Printf("代币 %s 已从持有列表移除", tokenAddress)
+	if ch, exists := b.heldTokens[tokenAddress]; exists {
+		close(ch) // 关闭通道
+		delete(b.heldTokens, tokenAddress)
+		log.Printf("代币 %s 已从持有列表移除", tokenAddress)
+
+		// 取消WebSocket订阅
+		if err := ws.UnsubscribeToTokenTrades([]string{tokenAddress}); err != nil {
+			log.Printf("取消订阅代币 %s 失败: %v", tokenAddress, err)
+		} else {
+			log.Printf("成功取消订阅代币 %s", tokenAddress)
+		}
+	}
 }
 
 // 关闭Bot并清理资源

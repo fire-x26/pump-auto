@@ -18,5 +18,5 @@ const (
 	BONK         PoolType = "bonk"
 )
 
-const MAX_HOLD_TOKEN = 5
+const MAX_HOLD_TOKEN = 3
 const PRECISION = 16
